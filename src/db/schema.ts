@@ -88,8 +88,6 @@ export async function initializeDatabase(client: Client): Promise<void> {
     );
 
     CREATE INDEX IF NOT EXISTS idx_digests_generated ON digests(generated_at);
-    CREATE INDEX IF NOT EXISTS idx_digests_status ON digests(status);
-    CREATE INDEX IF NOT EXISTS idx_digests_token ON digests(cleanup_token);
 
     -- User corrections for learning
     CREATE TABLE IF NOT EXISTS corrections (
@@ -148,5 +146,22 @@ export async function initializeDatabase(client: Client): Promise<void> {
     );
   } catch {
     // Column already exists, ignore error
+  }
+
+  // Create indexes for new columns (after migrations)
+  try {
+    await client.execute(
+      "CREATE INDEX IF NOT EXISTS idx_digests_status ON digests(status)"
+    );
+  } catch {
+    // Index may fail if column doesn't exist yet
+  }
+
+  try {
+    await client.execute(
+      "CREATE INDEX IF NOT EXISTS idx_digests_token ON digests(cleanup_token)"
+    );
+  } catch {
+    // Index may fail if column doesn't exist yet
   }
 }
