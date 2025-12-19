@@ -119,8 +119,13 @@ ${config.corrections.map((c) => `- "${c.emailType}" should be ${c.to}, not ${c.f
 CATEGORIES:
 - "important": Urgent or time-sensitive emails that need immediate attention
 - "needs-reply": Emails that require a response from the user, but aren't urgent
-- "fyi": Informational emails worth reading but don't need action
-- "low-priority": Newsletters, marketing, notifications that can be archived
+- "fyi": Informational emails worth reading but don't need action (personal updates, relevant announcements)
+- "low-priority": Newsletters, marketing emails, automated notifications, digests, subscription content - these should ALWAYS be low-priority regardless of content quality
+
+IMPORTANT RULES:
+- Newsletters and subscription emails are ALWAYS "low-priority", never "fyi"
+- Emails from addresses containing "newsletter", "marketing", "digest" are low-priority
+- Bulk/mass emails sent to many recipients are low-priority
 
 CONTENT FORMATS (for digest summarization):
 - "standard": Normal email, default treatment
