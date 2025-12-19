@@ -31,7 +31,8 @@ export async function initializeDatabase(client: Client): Promise<void> {
       reasoning TEXT,
       labels_applied TEXT,
       action_taken TEXT,
-      content_format TEXT DEFAULT 'standard'
+      content_format TEXT DEFAULT 'standard',
+      digest_id INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_processed_emails_from ON processed_emails(from_email);
@@ -77,13 +78,18 @@ export async function initializeDatabase(client: Client): Promise<void> {
     -- Digest tracking
     CREATE TABLE IF NOT EXISTS digests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      generated_at TEXT NOT NULL,
+      cleanup_token TEXT UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending',
+      generated_at TEXT,
       sent_at TEXT,
-      email_count INTEGER NOT NULL,
-      summary TEXT NOT NULL
+      cleaned_at TEXT,
+      email_count INTEGER DEFAULT 0,
+      summary TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_digests_generated ON digests(generated_at);
+    CREATE INDEX IF NOT EXISTS idx_digests_status ON digests(status);
+    CREATE INDEX IF NOT EXISTS idx_digests_token ON digests(cleanup_token);
 
     -- User corrections for learning
     CREATE TABLE IF NOT EXISTS corrections (
@@ -105,6 +111,40 @@ export async function initializeDatabase(client: Client): Promise<void> {
   try {
     await client.execute(
       "ALTER TABLE processed_emails ADD COLUMN content_format TEXT DEFAULT 'standard'"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  // Migration: Add digest_id column to processed_emails
+  try {
+    await client.execute(
+      "ALTER TABLE processed_emails ADD COLUMN digest_id INTEGER"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  // Migration: Add new columns to digests table
+  try {
+    await client.execute(
+      "ALTER TABLE digests ADD COLUMN cleanup_token TEXT UNIQUE"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  try {
+    await client.execute(
+      "ALTER TABLE digests ADD COLUMN status TEXT DEFAULT 'pending'"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  try {
+    await client.execute(
+      "ALTER TABLE digests ADD COLUMN cleaned_at TEXT"
     );
   } catch {
     // Column already exists, ignore error

@@ -23,6 +23,7 @@ export interface ProcessedEmail {
   labelsApplied: string | null;
   actionTaken: string | null;
   contentFormat: ContentFormat;
+  digestId: number | null;
 }
 
 export interface SenderProfile {
@@ -43,12 +44,17 @@ export interface SenderProfile {
   updatedAt: string;
 }
 
+export type DigestStatus = "pending" | "sent" | "cleaned";
+
 export interface DigestRecord {
   id: number;
-  generatedAt: string;
+  cleanupToken: string | null;
+  status: DigestStatus;
+  generatedAt: string | null;
   sentAt: string | null;
+  cleanedAt: string | null;
   emailCount: number;
-  summary: string;
+  summary: string | null;
 }
 
 export interface Correction {
@@ -82,8 +88,8 @@ export class Store {
     await this.db.execute({
       sql: `INSERT OR REPLACE INTO processed_emails
             (id, thread_id, from_email, from_name, subject, received_at,
-             processed_at, classification, confidence, reasoning, labels_applied, action_taken, content_format)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             processed_at, classification, confidence, reasoning, labels_applied, action_taken, content_format, digest_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         email.id,
         email.threadId,
@@ -98,6 +104,7 @@ export class Store {
         email.labelsApplied,
         email.actionTaken,
         email.contentFormat,
+        email.digestId,
       ],
     });
   }
@@ -124,6 +131,7 @@ export class Store {
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
+      digestId: row.digest_id as number | null,
     }));
   }
 
@@ -153,6 +161,7 @@ export class Store {
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
+      digestId: row.digest_id as number | null,
     }));
   }
 
@@ -309,26 +318,122 @@ export class Store {
 
   // ============ Digests ============
 
-  async saveDigest(emailCount: number, summary: string): Promise<number> {
-    const result = await this.db.execute({
-      sql: `INSERT INTO digests (generated_at, email_count, summary)
-            VALUES (?, ?, ?)`,
-      args: [new Date().toISOString(), emailCount, summary],
-    });
-
-    return Number(result.lastInsertRowid);
+  private generateCleanupToken(): string {
+    return crypto.randomUUID();
   }
 
-  async markDigestSent(digestId: number): Promise<void> {
+  async getPendingDigest(): Promise<DigestRecord> {
+    const result = await this.db.execute(
+      "SELECT * FROM digests WHERE status = 'pending' ORDER BY id DESC LIMIT 1"
+    );
+
+    if (result.rows.length > 0) {
+      const row = result.rows[0];
+      return {
+        id: row.id as number,
+        cleanupToken: row.cleanup_token as string | null,
+        status: row.status as DigestStatus,
+        generatedAt: row.generated_at as string | null,
+        sentAt: row.sent_at as string | null,
+        cleanedAt: row.cleaned_at as string | null,
+        emailCount: row.email_count as number,
+        summary: row.summary as string | null,
+      };
+    }
+
+    // No pending digest exists, create one
+    return this.createPendingDigest();
+  }
+
+  async createPendingDigest(): Promise<DigestRecord> {
+    const token = this.generateCleanupToken();
+    const result = await this.db.execute({
+      sql: `INSERT INTO digests (cleanup_token, status, email_count)
+            VALUES (?, 'pending', 0)`,
+      args: [token],
+    });
+
+    return {
+      id: Number(result.lastInsertRowid),
+      cleanupToken: token,
+      status: "pending",
+      generatedAt: null,
+      sentAt: null,
+      cleanedAt: null,
+      emailCount: 0,
+      summary: null,
+    };
+  }
+
+  async markDigestSent(
+    digestId: number,
+    emailCount: number,
+    summary: string
+  ): Promise<void> {
+    const now = new Date().toISOString();
     await this.db.execute({
-      sql: "UPDATE digests SET sent_at = ? WHERE id = ?",
+      sql: `UPDATE digests
+            SET status = 'sent', generated_at = ?, sent_at = ?, email_count = ?, summary = ?
+            WHERE id = ?`,
+      args: [now, now, emailCount, summary, digestId],
+    });
+  }
+
+  async getDigestByToken(token: string): Promise<DigestRecord | null> {
+    const result = await this.db.execute({
+      sql: "SELECT * FROM digests WHERE cleanup_token = ?",
+      args: [token],
+    });
+
+    if (result.rows.length === 0) return null;
+
+    const row = result.rows[0];
+    return {
+      id: row.id as number,
+      cleanupToken: row.cleanup_token as string | null,
+      status: row.status as DigestStatus,
+      generatedAt: row.generated_at as string | null,
+      sentAt: row.sent_at as string | null,
+      cleanedAt: row.cleaned_at as string | null,
+      emailCount: row.email_count as number,
+      summary: row.summary as string | null,
+    };
+  }
+
+  async getEmailsByDigestId(digestId: number): Promise<ProcessedEmail[]> {
+    const result = await this.db.execute({
+      sql: `SELECT * FROM processed_emails WHERE digest_id = ? ORDER BY received_at DESC`,
+      args: [digestId],
+    });
+
+    return result.rows.map((row) => ({
+      id: row.id as string,
+      threadId: row.thread_id as string | null,
+      fromEmail: row.from_email as string,
+      fromName: row.from_name as string | null,
+      subject: row.subject as string | null,
+      receivedAt: row.received_at as string,
+      processedAt: row.processed_at as string,
+      classification: row.classification as string,
+      confidence: row.confidence as number,
+      reasoning: row.reasoning as string | null,
+      labelsApplied: row.labels_applied as string | null,
+      actionTaken: row.action_taken as string | null,
+      contentFormat: (row.content_format as ContentFormat) || "standard",
+      digestId: row.digest_id as number | null,
+    }));
+  }
+
+  async markDigestCleaned(digestId: number): Promise<void> {
+    await this.db.execute({
+      sql: `UPDATE digests SET status = 'cleaned', cleaned_at = ? WHERE id = ?`,
       args: [new Date().toISOString(), digestId],
     });
   }
 
   async getLastDigest(): Promise<DigestRecord | null> {
     const result = await this.db.execute(
-      "SELECT * FROM digests ORDER BY generated_at DESC LIMIT 1"
+      "SELECT * FROM digests WHERE status != 'pending' ORDER BY generated_at DESC LIMIT 1"
     );
 
     if (result.rows.length === 0) return null;
@@ -336,10 +441,13 @@ export class Store {
     const row = result.rows[0];
     return {
       id: row.id as number,
-      generatedAt: row.generated_at as string,
+      cleanupToken: row.cleanup_token as string | null,
+      status: row.status as DigestStatus,
+      generatedAt: row.generated_at as string | null,
       sentAt: row.sent_at as string | null,
+      cleanedAt: row.cleaned_at as string | null,
       emailCount: row.email_count as number,
-      summary: row.summary as string,
+      summary: row.summary as string | null,
     };
   }
 
@@ -466,6 +574,7 @@ export class Store {
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
+      digestId: row.digest_id as number | null,
     };
   }
 

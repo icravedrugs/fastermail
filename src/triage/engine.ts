@@ -278,6 +278,9 @@ export class TriageEngine {
     labelsApplied?: string,
     contentFormat: ContentFormat = "standard"
   ): Promise<void> {
+    // Get the current pending digest to associate this email with
+    const pendingDigest = await this.store.getPendingDigest();
+
     const processed: ProcessedEmail = {
       id: email.id,
       threadId: email.threadId,
@@ -292,6 +295,7 @@ export class TriageEngine {
       labelsApplied: labelsApplied || null,
       actionTaken,
       contentFormat,
+      digestId: pendingDigest.id,
     };
 
     await this.store.saveProcessedEmail(processed);
