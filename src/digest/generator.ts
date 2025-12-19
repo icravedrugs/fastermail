@@ -44,11 +44,13 @@ export class DigestGenerator {
     const emails = await this.store.getProcessedEmailsSince(sinceTimestamp);
 
     // Filter to only archived/low-priority emails
+    // Also exclude emails from the user's own address (previous digests)
     const digestEmails = emails.filter(
       (e) =>
-        e.classification === "low-priority" ||
-        e.classification === "fyi" ||
-        e.actionTaken === "archived"
+        (e.classification === "low-priority" ||
+          e.classification === "fyi" ||
+          e.actionTaken === "archived") &&
+        e.fromEmail.toLowerCase() !== this.config.userEmail.toLowerCase()
     );
 
     if (digestEmails.length === 0) {

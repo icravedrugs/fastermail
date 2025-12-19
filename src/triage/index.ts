@@ -13,9 +13,4 @@ export {
   buildConfigFromStore,
   type Rule,
 } from "./rules.js";
-export {
-  TriageEngine,
-  type TriageEngineConfig,
-  type TriageResult,
-} from "./engine.js";
 export { CorrectionProcessor } from "./corrections.js";
