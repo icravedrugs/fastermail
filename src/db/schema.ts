@@ -126,7 +126,7 @@ export async function initializeDatabase(client: Client): Promise<void> {
   // Migration: Add new columns to digests table
   try {
     await client.execute(
-      "ALTER TABLE digests ADD COLUMN cleanup_token TEXT UNIQUE"
+      "ALTER TABLE digests ADD COLUMN cleanup_token TEXT"
     );
   } catch {
     // Column already exists, ignore error

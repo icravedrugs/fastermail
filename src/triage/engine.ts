@@ -17,6 +17,7 @@ export interface TriageEngineConfig {
   mode: "label-only" | "triage";
   anthropicApiKey: string;
   pollIntervalSeconds: number;
+  userEmail: string;
 }
 
 export interface TriageResult {
@@ -157,10 +158,13 @@ export class TriageEngine {
     // Fetch full email data
     const emails = await this.jmap.getEmails(idsToProcess);
 
-    // Also filter out emails that already have our classification labels
-    const emailsToProcess = emails.filter(
-      (email) => !this.labelManager.hasAnyClassificationMailbox(email.mailboxIds)
-    );
+    // Filter out emails from self (e.g., digest emails) and those already labeled
+    const emailsToProcess = emails.filter((email) => {
+      const fromEmail = email.from?.[0]?.email?.toLowerCase();
+      const isFromSelf = fromEmail === this.config.userEmail.toLowerCase();
+      const alreadyLabeled = this.labelManager.hasAnyClassificationMailbox(email.mailboxIds);
+      return !isFromSelf && !alreadyLabeled;
+    });
 
     if (emailsToProcess.length === 0) {
       // Mark as processed even if we skipped them

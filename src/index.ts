@@ -102,6 +102,7 @@ async function main(): Promise<void> {
     mode: "label-only", // Start in safe mode
     anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
     pollIntervalSeconds: pollInterval,
+    userEmail,
   });
 
   await triageEngine.initialize();
