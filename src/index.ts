@@ -45,9 +45,13 @@ async function main(): Promise<void> {
   const baseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
   const port = parseInt(process.env.PORT || "3000", 10);
 
+  // Unique instance ID for debugging duplicate sends
+  const instanceId = `${process.pid}-${Date.now()}`;
+
   console.log(`User email: ${userEmail}`);
   console.log(`Poll interval: ${pollInterval}s`);
   console.log(`Digest times: ${digestTimes.join(", ")}`);
+  console.log(`Instance ID: ${instanceId}`);
   if (baseUrl) {
     console.log(`Base URL: ${baseUrl}`);
   }
@@ -117,6 +121,7 @@ async function main(): Promise<void> {
     userEmail,
     digestTimes,
     baseUrl,
+    instanceId,
   });
 
   // Start triage engine

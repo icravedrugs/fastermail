@@ -64,10 +64,11 @@ export class DigestScheduler {
       const msUntilRun = nextRun.getTime() - now.getTime();
 
       console.log(
-        `Next digest at ${timeStr} scheduled for ${nextRun.toLocaleString()}`
+        `[TIMER] Setting timer for ${timeStr}, total timers: ${this.timers.length + 1}`
       );
 
       const timer = setTimeout(() => {
+        console.log(`[TIMER_FIRE] ${timeStr} fired, instance: ${this.config.instanceId}`);
         this.runDigest();
         // Reschedule for next day
         this.scheduleDigestAt(timeStr);
@@ -88,7 +89,12 @@ export class DigestScheduler {
 
     const msUntilRun = nextRun.getTime() - now.getTime();
 
+    console.log(
+      `[TIMER] Rescheduling timer for ${timeStr}, total timers: ${this.timers.length + 1}`
+    );
+
     const timer = setTimeout(() => {
+      console.log(`[TIMER_FIRE] ${timeStr} fired, instance: ${this.config.instanceId}`);
       this.runDigest();
       this.scheduleDigestAt(timeStr);
     }, msUntilRun);
