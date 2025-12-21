@@ -347,17 +347,18 @@ export class Store {
 
   async createPendingDigest(): Promise<DigestRecord> {
     const token = this.generateCleanupToken();
+    const now = new Date().toISOString();
     const result = await this.db.execute({
-      sql: `INSERT INTO digests (cleanup_token, status, email_count)
-            VALUES (?, 'pending', 0)`,
-      args: [token],
+      sql: `INSERT INTO digests (cleanup_token, status, email_count, generated_at, summary)
+            VALUES (?, 'pending', 0, ?, '')`,
+      args: [token, now],
     });
 
     return {
       id: Number(result.lastInsertRowid),
       cleanupToken: token,
       status: "pending",
-      generatedAt: null,
+      generatedAt: now,
       sentAt: null,
       cleanedAt: null,
       emailCount: 0,
