@@ -123,6 +123,8 @@ CATEGORIES:
 - "low-priority": Newsletters, marketing emails, automated notifications, digests, subscription content - these should ALWAYS be low-priority regardless of content quality
 
 IMPORTANT RULES:
+- Bills, invoices, and payment due notices are ALWAYS "important" - they are time-sensitive
+- Credit card statements and bank statements are ALWAYS "important"
 - Newsletters and subscription emails are ALWAYS "low-priority", never "fyi"
 - Emails from addresses containing "newsletter", "marketing", "digest" are low-priority
 - Bulk/mass emails sent to many recipients are low-priority

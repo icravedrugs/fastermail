@@ -222,6 +222,11 @@ export class TriageEngine {
       classification.classification
     );
 
+    // Remove from inbox (keep only in triage folder)
+    if (this.inboxId) {
+      await this.jmap.removeEmailFromMailbox(email.id, this.inboxId);
+    }
+
     // Apply suggested labels
     for (const label of classification.suggestedLabels.slice(0, 3)) {
       await this.labelManager.applyCustomLabel(email.id, label);
