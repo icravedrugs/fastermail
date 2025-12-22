@@ -539,11 +539,13 @@ export class JMAPClient {
     return setResult.created.draft.id;
   }
 
-  async sendEmail(draftId: string): Promise<void> {
+  async sendEmail(draftId: string): Promise<string> {
     const identities = await this.getIdentities();
     if (identities.length === 0) {
       throw new Error("No sending identity found");
     }
+
+    console.log(`[JMAP] EmailSubmission/set starting for draft ${draftId}`);
 
     const response = await this.request([
       [
@@ -562,9 +564,17 @@ export class JMAPClient {
     ]);
 
     const result = response.methodResponses[0];
+    console.log(`[JMAP] EmailSubmission/set response: ${JSON.stringify(result)}`);
+
     if (result[0] === "error") {
       throw new Error(`EmailSubmission/set failed: ${JSON.stringify(result[1])}`);
     }
+
+    const setResult = result[1] as { created?: Record<string, { id: string }> };
+    const submissionId = setResult.created?.submission?.id || "unknown";
+    console.log(`[JMAP] Submission created with ID: ${submissionId}`);
+
+    return submissionId;
   }
 
   async getIdentities(): Promise<Identity[]> {
