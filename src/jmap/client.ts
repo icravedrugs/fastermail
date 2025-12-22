@@ -559,8 +559,8 @@ export class JMAPClient {
             },
           },
           // Clean up the draft after successful send to prevent orphaned drafts
-          // and potential duplicate sends
-          onSuccessDestroyEmail: [draftId],
+          // #submission refers to the emailId of the created submission
+          onSuccessDestroyEmail: ["#submission"],
         },
         "0",
       ],
