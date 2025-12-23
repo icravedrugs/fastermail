@@ -87,13 +87,29 @@ export class LabelManager {
   }
 
   async removeAllClassificationLabels(emailId: string): Promise<void> {
-    for (const mailboxId of this.labelMailboxIds.values()) {
+    const entries = Array.from(this.labelMailboxIds.entries());
+    console.log(
+      `[LABELS_DEBUG] removeAllClassificationLabels(${emailId}): labelMailboxIds has ${entries.length} entries: ${entries.map(([k, v]) => `${k}=${v}`).join(", ")}`
+    );
+
+    for (const [classification, mailboxId] of this.labelMailboxIds.entries()) {
+      console.log(
+        `[LABELS_DEBUG] removeAllClassificationLabels(${emailId}): removing from ${classification} (mailboxId=${mailboxId})`
+      );
       try {
         await this.jmap.removeEmailFromMailbox(emailId, mailboxId);
-      } catch {
-        // Ignore errors - email might not be in this mailbox
+        console.log(
+          `[LABELS_DEBUG] removeAllClassificationLabels(${emailId}): removed from ${classification} - SUCCESS`
+        );
+      } catch (err) {
+        // Log the error but continue - email might not be in this mailbox
+        console.log(
+          `[LABELS_DEBUG] removeAllClassificationLabels(${emailId}): removed from ${classification} - FAILED:`,
+          err instanceof Error ? err.message : err
+        );
       }
     }
+    console.log(`[LABELS_DEBUG] removeAllClassificationLabels(${emailId}): completed`);
   }
 
   async applyCustomLabel(emailId: string, label: string): Promise<void> {
