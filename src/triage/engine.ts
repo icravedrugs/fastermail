@@ -169,7 +169,7 @@ export class TriageEngine {
     if (emailsToProcess.length === 0) {
       // Mark as processed even if we skipped them
       for (const email of emails) {
-        await this.markAsProcessed(email, "fyi", 1, "Already labeled", "labeled");
+        await this.markAsProcessed(email, "fyi", 1, "Already labeled", "", "labeled");
       }
       return [];
     }
@@ -257,6 +257,7 @@ export class TriageEngine {
       classification.classification,
       classification.confidence,
       classification.reasoning,
+      classification.contentSummary,
       actionTaken,
       labelsApplied.join(","),
       classification.contentFormat
@@ -283,6 +284,7 @@ export class TriageEngine {
     classification: Classification,
     confidence: number,
     reasoning: string,
+    contentSummary: string,
     actionTaken: string,
     labelsApplied?: string,
     contentFormat: ContentFormat = "standard"
@@ -301,6 +303,7 @@ export class TriageEngine {
       classification,
       confidence,
       reasoning,
+      contentSummary,
       labelsApplied: labelsApplied || null,
       actionTaken,
       contentFormat,

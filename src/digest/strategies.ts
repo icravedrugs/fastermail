@@ -1,9 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ProcessedEmail, ContentFormat } from "../db/index.js";
 import type { Email } from "../jmap/index.js";
-import { extractStoryLinks, type ExtractedLink } from "./link-extractor.js";
+import { extractLinksWithContext, type ExtractedLink } from "./link-extractor.js";
 
 export interface DigestItem {
+  emailId: string;
+  threadId: string;
   from: string;
   subject: string;
   summary: string;
@@ -64,22 +66,27 @@ function getEmailBodyHtml(email: Email): string | null {
 
 /**
  * Apply the standard summarization strategy
- * Just uses the classification reasoning as the summary
+ * Uses the content summary for actual email content
  */
 function applyStandardStrategy(
   processedEmail: ProcessedEmail
 ): DigestItem {
+  // Use contentSummary (actual content), fall back to reasoning only if needed
+  const summary = processedEmail.contentSummary || processedEmail.reasoning || "No summary available";
+
   return {
+    emailId: processedEmail.id,
+    threadId: processedEmail.threadId || processedEmail.id,
     from: processedEmail.fromName || processedEmail.fromEmail,
     subject: processedEmail.subject || "(no subject)",
-    summary: processedEmail.reasoning || "No summary available",
+    summary,
     contentFormat: processedEmail.contentFormat,
   };
 }
 
 /**
  * Apply the link_collection strategy
- * Extracts story links from the email body
+ * Extracts story links from the email body with context/descriptions
  */
 function applyLinkCollectionStrategy(
   processedEmail: ProcessedEmail,
@@ -90,15 +97,17 @@ function applyLinkCollectionStrategy(
   if (emailBody) {
     const html = getEmailBodyHtml(emailBody);
     if (html) {
-      links = extractStoryLinks(html, 8);
+      // Use extractLinksWithContext to get links with descriptions
+      links = extractLinksWithContext(html).slice(0, 10);
     }
   }
 
-  const summary = links.length > 0
-    ? `${links.length} stories/links`
-    : processedEmail.reasoning || "Newsletter with links";
+  // Use contentSummary for the overview, not generic "X stories/links"
+  const summary = processedEmail.contentSummary || processedEmail.reasoning || "Newsletter with curated links";
 
   return {
+    emailId: processedEmail.id,
+    threadId: processedEmail.threadId || processedEmail.id,
     from: processedEmail.fromName || processedEmail.fromEmail,
     subject: processedEmail.subject || "(no subject)",
     summary,
@@ -109,16 +118,18 @@ function applyLinkCollectionStrategy(
 
 /**
  * Apply the article strategy
- * Uses Claude to generate a brief prose summary
+ * Uses contentSummary or Claude to generate a brief prose summary
  */
 async function applyArticleStrategy(
   processedEmail: ProcessedEmail,
   emailBody: Email | null,
   client: Anthropic
 ): Promise<DigestItem> {
-  let summary = processedEmail.reasoning || "Article content";
+  // Prefer contentSummary if available (already generated during classification)
+  let summary = processedEmail.contentSummary || "";
 
-  if (emailBody) {
+  // Only call Claude if we don't have a contentSummary and have email body
+  if (!summary && emailBody) {
     const bodyText = getEmailBodyText(emailBody);
     if (bodyText.length > 100) {
       try {
@@ -148,7 +159,14 @@ Respond with just the summary, no preamble.`,
     }
   }
 
+  // Final fallback
+  if (!summary) {
+    summary = processedEmail.reasoning || "Article content";
+  }
+
   return {
+    emailId: processedEmail.id,
+    threadId: processedEmail.threadId || processedEmail.id,
     from: processedEmail.fromName || processedEmail.fromEmail,
     subject: processedEmail.subject || "(no subject)",
     summary,
@@ -163,13 +181,15 @@ Respond with just the summary, no preamble.`,
 function applyAnnouncementStrategy(
   processedEmail: ProcessedEmail
 ): DigestItem {
-  // For announcements, the reasoning usually captures the gist
-  const summary = processedEmail.reasoning || "Announcement";
+  // Use contentSummary for actual announcement content
+  const summary = processedEmail.contentSummary || processedEmail.reasoning || "Announcement";
 
   return {
+    emailId: processedEmail.id,
+    threadId: processedEmail.threadId || processedEmail.id,
     from: processedEmail.fromName || processedEmail.fromEmail,
     subject: processedEmail.subject || "(no subject)",
-    summary: summary.length > 100 ? summary.slice(0, 100) + "..." : summary,
+    summary: summary.length > 150 ? summary.slice(0, 150) + "..." : summary,
     contentFormat: processedEmail.contentFormat,
   };
 }
@@ -182,9 +202,10 @@ function applyTransactionalStrategy(
   processedEmail: ProcessedEmail,
   emailBody: Email | null
 ): DigestItem {
-  let summary = processedEmail.reasoning || "Transaction/confirmation";
+  // Start with contentSummary if available
+  let summary = processedEmail.contentSummary || "";
 
-  // Try to extract key details from the email
+  // Try to extract key details from the email to supplement or create summary
   if (emailBody) {
     const text = getEmailBodyText(emailBody);
     const details: string[] = [];
@@ -207,12 +228,21 @@ function applyTransactionalStrategy(
       details.push(dateMatch[1].trim());
     }
 
+    // Use extracted details if no contentSummary, or append to contentSummary
     if (details.length > 0) {
-      summary = details.join(" | ");
+      const detailsStr = details.join(" | ");
+      summary = summary ? `${summary} (${detailsStr})` : detailsStr;
     }
   }
 
+  // Final fallback
+  if (!summary) {
+    summary = processedEmail.reasoning || "Transaction/confirmation";
+  }
+
   return {
+    emailId: processedEmail.id,
+    threadId: processedEmail.threadId || processedEmail.id,
     from: processedEmail.fromName || processedEmail.fromEmail,
     subject: processedEmail.subject || "(no subject)",
     summary,

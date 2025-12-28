@@ -19,6 +19,7 @@ export interface ClassificationResult {
   classification: Classification;
   confidence: number;
   reasoning: string;
+  contentSummary: string;
   suggestedLabels: string[];
   contentFormat: ContentFormat;
 }
@@ -155,6 +156,7 @@ Respond in this exact format:
 CLASSIFICATION: [one of: important, needs-reply, fyi, low-priority]
 CONFIDENCE: [0.0 to 1.0]
 REASONING: [Brief explanation of why this classification was chosen]
+CONTENT_SUMMARY: [2-3 sentence summary of what the email is ABOUT - the actual content, topics discussed, or key information. For newsletters with links, mention the main topics. For articles, state the main argument. Do NOT describe the email type or sender - focus on the content itself.]
 LABELS: [comma-separated list of suggested labels like "newsletter", "receipt", "meeting", "personal", etc.]
 CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, transactional]`;
 
@@ -167,6 +169,7 @@ CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, trans
     let classification: Classification = "fyi";
     let confidence = 0.5;
     let reasoning = "";
+    let contentSummary = "";
     let suggestedLabels: string[] = [];
     let contentFormat: ContentFormat = "standard";
 
@@ -188,6 +191,8 @@ CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, trans
         }
       } else if (line.startsWith("REASONING:")) {
         reasoning = line.replace("REASONING:", "").trim();
+      } else if (line.startsWith("CONTENT_SUMMARY:")) {
+        contentSummary = line.replace("CONTENT_SUMMARY:", "").trim();
       } else if (line.startsWith("LABELS:")) {
         const value = line.replace("LABELS:", "").trim();
         suggestedLabels = value
@@ -212,6 +217,7 @@ CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, trans
       classification,
       confidence,
       reasoning,
+      contentSummary,
       suggestedLabels,
       contentFormat,
     };
@@ -248,6 +254,7 @@ CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, trans
             classification: "fyi",
             confidence: 0,
             reasoning: "Classification failed",
+            contentSummary: "",
             suggestedLabels: [],
             contentFormat: "standard",
           });

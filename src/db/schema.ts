@@ -29,6 +29,7 @@ export async function initializeDatabase(client: Client): Promise<void> {
       classification TEXT NOT NULL,
       confidence REAL NOT NULL,
       reasoning TEXT,
+      content_summary TEXT,
       labels_applied TEXT,
       action_taken TEXT,
       content_format TEXT DEFAULT 'standard',
@@ -109,6 +110,15 @@ export async function initializeDatabase(client: Client): Promise<void> {
   try {
     await client.execute(
       "ALTER TABLE processed_emails ADD COLUMN content_format TEXT DEFAULT 'standard'"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  // Migration: Add content_summary column to processed_emails
+  try {
+    await client.execute(
+      "ALTER TABLE processed_emails ADD COLUMN content_summary TEXT"
     );
   } catch {
     // Column already exists, ignore error

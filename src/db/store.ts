@@ -20,6 +20,7 @@ export interface ProcessedEmail {
   classification: string;
   confidence: number;
   reasoning: string | null;
+  contentSummary: string | null;
   labelsApplied: string | null;
   actionTaken: string | null;
   contentFormat: ContentFormat;
@@ -88,8 +89,8 @@ export class Store {
     await this.db.execute({
       sql: `INSERT OR REPLACE INTO processed_emails
             (id, thread_id, from_email, from_name, subject, received_at,
-             processed_at, classification, confidence, reasoning, labels_applied, action_taken, content_format, digest_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         email.id,
         email.threadId,
@@ -101,6 +102,7 @@ export class Store {
         email.classification,
         email.confidence,
         email.reasoning,
+        email.contentSummary,
         email.labelsApplied,
         email.actionTaken,
         email.contentFormat,
@@ -128,6 +130,7 @@ export class Store {
       classification: row.classification as string,
       confidence: row.confidence as number,
       reasoning: row.reasoning as string | null,
+      contentSummary: row.content_summary as string | null,
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
@@ -158,6 +161,7 @@ export class Store {
       classification: row.classification as string,
       confidence: row.confidence as number,
       reasoning: row.reasoning as string | null,
+      contentSummary: row.content_summary as string | null,
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
@@ -418,6 +422,7 @@ export class Store {
       classification: row.classification as string,
       confidence: row.confidence as number,
       reasoning: row.reasoning as string | null,
+      contentSummary: row.content_summary as string | null,
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
@@ -572,6 +577,7 @@ export class Store {
       classification: row.classification as string,
       confidence: row.confidence as number,
       reasoning: row.reasoning as string | null,
+      contentSummary: row.content_summary as string | null,
       labelsApplied: row.labels_applied as string | null,
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",

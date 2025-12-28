@@ -14,6 +14,8 @@ export interface DigestConfig {
 export interface DigestSection {
   title: string;
   items: Array<{
+    emailId: string;
+    threadId: string;
     from: string;
     subject: string;
     summary: string;
@@ -154,8 +156,8 @@ export class DigestGenerator {
   private async summarizeGroup(
     category: string,
     emails: ProcessedEmail[]
-  ): Promise<Array<{ from: string; subject: string; summary: string; links?: ExtractedLink[] }>> {
-    const results: Array<{ from: string; subject: string; summary: string; links?: ExtractedLink[] }> = [];
+  ): Promise<Array<{ emailId: string; threadId: string; from: string; subject: string; summary: string; links?: ExtractedLink[] }>> {
+    const results: Array<{ emailId: string; threadId: string; from: string; subject: string; summary: string; links?: ExtractedLink[] }> = [];
 
     for (const email of emails) {
       try {
@@ -172,6 +174,8 @@ export class DigestGenerator {
         // Apply the appropriate strategy
         const item = await applySummaryStrategy(email, emailBody, this.client);
         results.push({
+          emailId: item.emailId,
+          threadId: item.threadId,
           from: item.from,
           subject: item.subject,
           summary: item.summary,
@@ -181,9 +185,11 @@ export class DigestGenerator {
         console.error(`Failed to summarize email ${email.id}:`, error);
         // Fall back to basic summary
         results.push({
+          emailId: email.id,
+          threadId: email.threadId || email.id,
           from: email.fromName || email.fromEmail,
           subject: email.subject || "(no subject)",
-          summary: email.reasoning || "No summary available",
+          summary: email.contentSummary || email.reasoning || "No summary available",
         });
       }
     }
@@ -202,6 +208,15 @@ export class DigestGenerator {
     return titles[category] || category;
   }
 
+  private escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   private generateHtml(sections: DigestSection[], cleanupUrl: string | null): string {
     const sectionHtml = sections
       .filter((s) => s.items.length > 0)
@@ -214,22 +229,28 @@ export class DigestGenerator {
           <ul style="list-style: none; padding: 0; margin: 0;">
             ${section.items
               .map(
-                (item) => `
+                (item) => {
+                  const fastmailUrl = `https://app.fastmail.com/mail/Inbox/${item.threadId}.${item.emailId}`;
+                  return `
               <li style="margin-bottom: 12px; padding: 12px; background: #f9f9f9; border-radius: 8px;">
-                <div style="font-weight: 600; color: #333;">${item.subject}</div>
-                <div style="font-size: 13px; color: #666; margin-top: 4px;">From: ${item.from}</div>
-                <div style="font-size: 14px; color: #444; margin-top: 8px;">${item.summary}</div>
+                <div style="font-weight: 600;">
+                  <a href="${fastmailUrl}" style="color: #333; text-decoration: none;">${this.escapeHtml(item.subject)}</a>
+                </div>
+                <div style="font-size: 13px; color: #666; margin-top: 4px;">From: ${this.escapeHtml(item.from)}</div>
+                <div style="font-size: 14px; color: #444; margin-top: 8px;">${this.escapeHtml(item.summary)}</div>
                 ${item.links && item.links.length > 0 ? `
-                <ul style="margin-top: 8px; padding-left: 16px; list-style: disc;">
+                <div style="margin-top: 10px;">
                   ${item.links.map((link) => `
-                    <li style="margin-bottom: 4px;">
-                      <a href="${link.url}" style="color: #0066cc; text-decoration: none;">${link.title}</a>
-                    </li>
+                    <div style="margin-top: 6px; padding-left: 12px; border-left: 2px solid #ddd;">
+                      <a href="${link.url}" style="color: #0066cc; text-decoration: none;">${this.escapeHtml(link.title)}</a>
+                      ${link.description ? `<div style="font-size: 13px; color: #666; margin-top: 2px;">${this.escapeHtml(link.description)}</div>` : ""}
+                    </div>
                   `).join("")}
-                </ul>
+                </div>
                 ` : ""}
               </li>
-            `
+            `;
+                }
               )
               .join("")}
           </ul>
@@ -273,11 +294,15 @@ export class DigestGenerator {
           `## ${section.title} (${section.items.length})\n\n` +
           section.items
             .map((item) => {
-              let text = `* ${item.subject}\n  From: ${item.from}\n  ${item.summary}`;
+              const fastmailUrl = `https://app.fastmail.com/mail/Inbox/${item.threadId}.${item.emailId}`;
+              let text = `* ${item.subject}\n  From: ${item.from}\n  ${item.summary}\n  View: ${fastmailUrl}`;
               if (item.links && item.links.length > 0) {
                 text += "\n  Links:";
                 for (const link of item.links) {
                   text += `\n    - ${link.title}: ${link.url}`;
+                  if (link.description) {
+                    text += `\n      ${link.description}`;
+                  }
                 }
               }
               return text;
