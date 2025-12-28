@@ -68,6 +68,10 @@ export class LabelManager {
     return this.correctionMailboxId;
   }
 
+  getClassificationMailboxIds(): string[] {
+    return Array.from(this.labelMailboxIds.values());
+  }
+
   async applyClassificationLabel(
     emailId: string,
     classification: Classification

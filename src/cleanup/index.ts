@@ -78,6 +78,15 @@ export async function runCleanup(
   }
   console.log(`[CLEANUP_DEBUG] Inbox mailbox id=${inbox.id}`);
 
+  // Get archive mailbox for safety net (emails with no folders get deleted by Fastmail)
+  const archive = await jmap.findMailboxByRole("archive");
+  const archiveId = archive?.id;
+  console.log(`[CLEANUP_DEBUG] Archive mailbox id=${archiveId || "NOT FOUND"}`);
+
+  // Get classification mailbox IDs to check if email would be orphaned
+  const classificationIds = labelManager.getClassificationMailboxIds();
+  console.log(`[CLEANUP_DEBUG] Classification mailbox ids=[${classificationIds.join(", ")}]`);
+
   let archived = 0;
   let kept = 0;
   let deleted = 0;
@@ -99,28 +108,39 @@ export async function runCleanup(
       }
 
       const currentEmail = fullEmails[0];
-      const mailboxIdsList = Object.keys(currentEmail.mailboxIds).filter(
+      const currentMailboxIds = Object.keys(currentEmail.mailboxIds).filter(
         (k) => currentEmail.mailboxIds[k]
       );
-      console.log(`[CLEANUP_DEBUG] Email ${email.id}: found, mailboxIds=[${mailboxIdsList.join(", ")}]`);
+      console.log(`[CLEANUP_DEBUG] Email ${email.id}: found, mailboxIds=[${currentMailboxIds.join(", ")}]`);
 
       const isInInbox = currentEmail.mailboxIds[inbox.id] === true;
       console.log(`[CLEANUP_DEBUG] Email ${email.id}: isInInbox=${isInInbox}`);
+
+      // Check if email is ONLY in classification folders (would be orphaned after removal)
+      const nonClassificationMailboxes = currentMailboxIds.filter(
+        (id) => !classificationIds.includes(id)
+      );
+      console.log(`[CLEANUP_DEBUG] Email ${email.id}: nonClassificationMailboxes=[${nonClassificationMailboxes.join(", ")}]`);
+
+      // Safety: If email would be orphaned (only in classification folders), add to Archive first
+      // This prevents Fastmail from deleting emails with no mailboxes
+      if (nonClassificationMailboxes.length === 0 && archiveId) {
+        console.log(`[CLEANUP_DEBUG] Email ${email.id}: would be orphaned, adding to Archive first`);
+        await jmap.addEmailToMailbox(email.id, archiveId);
+        console.log(`[CLEANUP_DEBUG] Email ${email.id}: added to Archive`);
+      }
 
       // Remove from all classification/triage folders
       console.log(`[CLEANUP_DEBUG] Email ${email.id}: calling removeAllClassificationLabels`);
       await labelManager.removeAllClassificationLabels(email.id);
       console.log(`[CLEANUP_DEBUG] Email ${email.id}: removeAllClassificationLabels completed`);
 
+      // Track outcome (no archiveEmail call - we just remove labels)
       if (isInInbox) {
-        // User moved to inbox - just remove from triage folders (already done above)
-        console.log(`[CLEANUP_DEBUG] Email ${email.id}: in inbox -> kept`);
+        console.log(`[CLEANUP_DEBUG] Email ${email.id}: was in inbox -> kept`);
         kept++;
       } else {
-        // Not in inbox - archive the email
-        console.log(`[CLEANUP_DEBUG] Email ${email.id}: not in inbox, calling archiveEmail`);
-        await jmap.archiveEmail(email.id);
-        console.log(`[CLEANUP_DEBUG] Email ${email.id}: archiveEmail completed -> archived`);
+        console.log(`[CLEANUP_DEBUG] Email ${email.id}: not in inbox -> archived (label removed)`);
         archived++;
       }
     } catch (err) {
