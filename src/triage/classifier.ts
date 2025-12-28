@@ -156,7 +156,11 @@ Respond in this exact format:
 CLASSIFICATION: [one of: important, needs-reply, fyi, low-priority]
 CONFIDENCE: [0.0 to 1.0]
 REASONING: [Brief explanation of why this classification was chosen]
-CONTENT_SUMMARY: [2-3 sentence summary of what the email is ABOUT - the actual content, topics discussed, or key information. For newsletters with links, mention the main topics. For articles, state the main argument. Do NOT describe the email type or sender - focus on the content itself.]
+CONTENT_SUMMARY: [2-3 sentences about the CONTENT ONLY. NEVER start with "This email is..." or "This is a...". NEVER describe the email format or sender. Just state what information or topics are covered.
+BAD: "This is a newsletter featuring links about AI and economics"
+GOOD: "AI regulation updates in Europe. New study shows remote work increases productivity by 13%. Tyler Cowen discusses inflation trends."
+BAD: "This email is a shipping notification for an order"
+GOOD: "Volvo XC60 rental return confirmed. Fuel dropped from 8/8 to 4/8. Mileage charges may apply."]
 LABELS: [comma-separated list of suggested labels like "newsletter", "receipt", "meeting", "personal", etc.]
 CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, transactional]`;
 
