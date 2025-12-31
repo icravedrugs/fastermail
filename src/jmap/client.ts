@@ -382,31 +382,11 @@ export class JMAPClient {
   }
 
   async moveEmail(emailId: string, toMailboxId: string): Promise<void> {
-    console.log(`[JMAP_DEBUG] moveEmail(${emailId}, ${toMailboxId}): fetching current state`);
     const emails = await this.getEmails([emailId], ["mailboxIds"]);
     if (emails.length === 0) {
-      console.log(`[JMAP_DEBUG] moveEmail(${emailId}): email NOT FOUND in getEmails`);
       throw new Error(`Email not found: ${emailId}`);
     }
 
-    const currentMailboxIds = emails[0].mailboxIds;
-    const currentMailboxList = Object.keys(currentMailboxIds).filter(
-      (k) => currentMailboxIds[k]
-    );
-    console.log(
-      `[JMAP_DEBUG] moveEmail(${emailId}): current mailboxIds=[${currentMailboxList.join(", ")}]`
-    );
-
-    const newMailboxIds: Record<string, boolean> = { [toMailboxId]: true };
-
-    // Remove from current mailboxes
-    for (const id of Object.keys(currentMailboxIds)) {
-      if (id !== toMailboxId) {
-        newMailboxIds[id] = false;
-      }
-    }
-
-    console.log(`[JMAP_DEBUG] moveEmail(${emailId}): sending Email/set to move to ${toMailboxId}`);
     const response = await this.request([
       [
         "Email/set",
@@ -422,22 +402,16 @@ export class JMAPClient {
 
     const result = response.methodResponses[0];
     if (result[0] === "error") {
-      console.log(`[JMAP_DEBUG] moveEmail(${emailId}): FAILED - ${JSON.stringify(result[1])}`);
       throw new Error(`Email/set failed: ${JSON.stringify(result[1])}`);
     }
-    console.log(`[JMAP_DEBUG] moveEmail(${emailId}): SUCCESS`);
   }
 
   async archiveEmail(emailId: string): Promise<void> {
-    console.log(`[JMAP_DEBUG] archiveEmail(${emailId}): starting`);
     const archive = await this.findMailboxByRole("archive");
     if (!archive) {
-      console.log(`[JMAP_DEBUG] archiveEmail(${emailId}): FAILED - archive mailbox not found`);
       throw new Error("Archive mailbox not found");
     }
-    console.log(`[JMAP_DEBUG] archiveEmail(${emailId}): archive mailbox id=${archive.id}`);
     await this.moveEmail(emailId, archive.id);
-    console.log(`[JMAP_DEBUG] archiveEmail(${emailId}): SUCCESS`);
   }
 
   async addEmailToMailbox(emailId: string, mailboxId: string): Promise<void> {
@@ -464,7 +438,6 @@ export class JMAPClient {
   }
 
   async removeEmailFromMailbox(emailId: string, mailboxId: string): Promise<void> {
-    console.log(`[JMAP_DEBUG] removeEmailFromMailbox(${emailId}, ${mailboxId}): sending request`);
     const response = await this.request([
       [
         "Email/set",
@@ -482,9 +455,6 @@ export class JMAPClient {
 
     const result = response.methodResponses[0];
     if (result[0] === "error") {
-      console.log(
-        `[JMAP_DEBUG] removeEmailFromMailbox(${emailId}, ${mailboxId}): FAILED - ${JSON.stringify(result[1])}`
-      );
       throw new Error(`Email/set failed: ${JSON.stringify(result[1])}`);
     }
 
@@ -495,13 +465,8 @@ export class JMAPClient {
     };
     if (setResult.notUpdated && setResult.notUpdated[emailId]) {
       const error = setResult.notUpdated[emailId];
-      console.log(
-        `[JMAP_DEBUG] removeEmailFromMailbox(${emailId}, ${mailboxId}): notUpdated - ${error.type}: ${error.description}`
-      );
       throw new Error(`Email update failed: ${error.type} - ${error.description}`);
     }
-
-    console.log(`[JMAP_DEBUG] removeEmailFromMailbox(${emailId}, ${mailboxId}): SUCCESS`);
   }
 
   // ============ Email Creation (for sending) ============
@@ -580,8 +545,6 @@ export class JMAPClient {
       throw new Error("No sending identity found");
     }
 
-    console.log(`[JMAP] EmailSubmission/set starting for draft ${draftId}`);
-
     const response = await this.request([
       [
         "EmailSubmission/set",
@@ -602,17 +565,12 @@ export class JMAPClient {
     ]);
 
     const result = response.methodResponses[0];
-    console.log(`[JMAP] EmailSubmission/set response: ${JSON.stringify(result)}`);
-
     if (result[0] === "error") {
       throw new Error(`EmailSubmission/set failed: ${JSON.stringify(result[1])}`);
     }
 
     const setResult = result[1] as { created?: Record<string, { id: string }> };
-    const submissionId = setResult.created?.submission?.id || "unknown";
-    console.log(`[JMAP] Submission created with ID: ${submissionId}`);
-
-    return submissionId;
+    return setResult.created?.submission?.id || "unknown";
   }
 
   async getIdentities(): Promise<Identity[]> {

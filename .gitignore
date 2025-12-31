@@ -150,3 +150,7 @@ data/
 # OS
 .DS_Store
 .vercel
+
+# Generated/preview files
+preview-digest.html
+scripts/preview-digest-html.ts
