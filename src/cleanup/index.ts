@@ -75,52 +75,69 @@ export async function runCleanup(
   // Get classification mailbox IDs to check if email would be orphaned
   const classificationIds = labelManager.getClassificationMailboxIds();
 
+  // Batch fetch all emails in one API call
+  const emailIds = emails.map((e) => e.id);
+  const fullEmails = await jmap.getEmails(emailIds);
+  const emailMap = new Map(fullEmails.map((e) => [e.id, e]));
+
+  // Build batch update for all emails
+  const classificationRemovalPatch = labelManager.buildRemoveAllClassificationLabelsPatch();
+  const updates: Record<string, Record<string, unknown>> = {};
+
   let archived = 0;
   let kept = 0;
   let deleted = 0;
 
-  // Process each email
   for (const email of emails) {
-    try {
-      // Fetch current state of email
-      const fullEmails = await jmap.getEmails([email.id]);
+    const currentEmail = emailMap.get(email.id);
 
-      // Email was deleted by user - skip it
-      if (!fullEmails || fullEmails.length === 0) {
-        deleted++;
-        continue;
-      }
-
-      const currentEmail = fullEmails[0];
-      const currentMailboxIds = Object.keys(currentEmail.mailboxIds).filter(
-        (k) => currentEmail.mailboxIds[k]
-      );
-
-      const isInInbox = currentEmail.mailboxIds[inbox.id] === true;
-
-      // Check if email is ONLY in classification folders (would be orphaned after removal)
-      const nonClassificationMailboxes = currentMailboxIds.filter(
-        (id) => !classificationIds.includes(id)
-      );
-
-      // Safety: If email would be orphaned (only in classification folders), add to Archive first
-      // This prevents Fastmail from deleting emails with no mailboxes
-      if (nonClassificationMailboxes.length === 0 && archiveId) {
-        await jmap.addEmailToMailbox(email.id, archiveId);
-      }
-
-      // Remove from all classification/triage folders
-      await labelManager.removeAllClassificationLabels(email.id);
-
-      // Track outcome (no archiveEmail call - we just remove labels)
-      if (isInInbox) {
-        kept++;
-      } else {
-        archived++;
-      }
-    } catch {
-      // Email may have been deleted or is inaccessible - count as deleted
+    // Email was deleted by user - count as deleted
+    if (!currentEmail) {
       deleted++;
+      continue;
+    }
+
+    const currentMailboxIds = Object.keys(currentEmail.mailboxIds).filter(
+      (k) => currentEmail.mailboxIds[k]
+    );
+    const isInInbox = currentEmail.mailboxIds[inbox.id] === true;
+
+    // Check if email would be orphaned (only in classification folders)
+    const nonClassificationMailboxes = currentMailboxIds.filter(
+      (id) => !classificationIds.includes(id)
+    );
+
+    // Build update patch: remove classification labels + add to archive if orphaned
+    const patch: Record<string, unknown> = { ...classificationRemovalPatch };
+    if (nonClassificationMailboxes.length === 0 && archiveId) {
+      patch[`mailboxIds/${archiveId}`] = true;
+    }
+
+    updates[email.id] = patch;
+
+    if (isInInbox) {
+      kept++;
+    } else {
+      archived++;
+    }
+  }
+
+  // Execute batch update in one API call
+  if (Object.keys(updates).length > 0) {
+    const result = await jmap.batchUpdateEmails(updates);
+
+    // Adjust counts for emails that failed to update
+    for (const failedId of Object.keys(result.notUpdated)) {
+      const email = emailMap.get(failedId);
+      if (email) {
+        const wasInInbox = email.mailboxIds[inbox.id] === true;
+        if (wasInInbox) {
+          kept--;
+        } else {
+          archived--;
+        }
+        deleted++;
+      }
     }
   }
 

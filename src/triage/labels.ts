@@ -100,6 +100,14 @@ export class LabelManager {
     }
   }
 
+  buildRemoveAllClassificationLabelsPatch(): Record<string, null> {
+    const patch: Record<string, null> = {};
+    for (const mailboxId of this.labelMailboxIds.values()) {
+      patch[`mailboxIds/${mailboxId}`] = null;
+    }
+    return patch;
+  }
+
   async applyCustomLabel(emailId: string, label: string): Promise<void> {
     // For custom labels, we'll still use keywords (they won't be visible but are searchable)
     const keyword = `$fastermail_${label.toLowerCase().replace(/[^a-z0-9]/g, "_")}`;

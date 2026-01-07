@@ -469,6 +469,40 @@ export class JMAPClient {
     }
   }
 
+  async batchUpdateEmails(
+    updates: Record<string, Record<string, unknown>>
+  ): Promise<{ updated: string[]; notUpdated: Record<string, { type: string; description?: string }> }> {
+    if (Object.keys(updates).length === 0) {
+      return { updated: [], notUpdated: {} };
+    }
+
+    const response = await this.request([
+      [
+        "Email/set",
+        {
+          accountId: this.accountId,
+          update: updates,
+        },
+        "0",
+      ],
+    ]);
+
+    const result = response.methodResponses[0];
+    if (result[0] === "error") {
+      throw new Error(`Email/set failed: ${JSON.stringify(result[1])}`);
+    }
+
+    const setResult = result[1] as {
+      updated?: Record<string, unknown>;
+      notUpdated?: Record<string, { type: string; description?: string }>;
+    };
+
+    return {
+      updated: Object.keys(setResult.updated ?? {}),
+      notUpdated: setResult.notUpdated ?? {},
+    };
+  }
+
   // ============ Email Creation (for sending) ============
 
   async createDraft(email: {
