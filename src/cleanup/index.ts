@@ -144,6 +144,27 @@ export async function runCleanup(
   // Mark digest as cleaned
   await store.markDigestCleaned(digest.id);
 
+  // Archive the digest email itself
+  if (digest.sentAt) {
+    try {
+      const sentTime = new Date(digest.sentAt).getTime();
+      const digestEmailIds = await jmap.queryEmails(
+        {
+          text: "Email Digest",
+          after: new Date(sentTime - 60000).toISOString(),
+          before: new Date(sentTime + 60000).toISOString(),
+        },
+        { limit: 1 }
+      );
+
+      if (digestEmailIds.length > 0) {
+        await jmap.archiveEmail(digestEmailIds[0]);
+      }
+    } catch {
+      // Best effort - don't fail cleanup if digest archiving fails
+    }
+  }
+
   return {
     success: true,
     archived,
