@@ -219,6 +219,75 @@ async function main(): Promise<void> {
     } else if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
+    } else if (url.pathname === "/cleanup-keywords") {
+      // Cleanup endpoint to remove $fastermail_* keywords that hit the limit
+      try {
+        console.log("Starting keyword cleanup...");
+
+        const mailboxes = await jmap.getMailboxes();
+        const fasterMailboxes = mailboxes.filter(m =>
+          m.parentId && mailboxes.find(p => p.id === m.parentId && p.name === "Fastermail")
+        );
+
+        let totalCleaned = 0;
+        let totalErrors = 0;
+
+        for (const mailbox of fasterMailboxes) {
+          console.log(`  Cleaning ${mailbox.name}...`);
+          const result = await jmap.cleanupFastermailKeywords(mailbox.id);
+          totalCleaned += result.cleaned;
+          totalErrors += result.errors;
+          console.log(`    Cleaned: ${result.cleaned}, Errors: ${result.errors}`);
+        }
+
+        // Also clean inbox and archive
+        const inbox = await jmap.findMailboxByRole("inbox");
+        if (inbox) {
+          console.log("  Cleaning Inbox...");
+          const result = await jmap.cleanupFastermailKeywords(inbox.id);
+          totalCleaned += result.cleaned;
+          totalErrors += result.errors;
+        }
+
+        const archive = await jmap.findMailboxByRole("archive");
+        if (archive) {
+          console.log("  Cleaning Archive...");
+          const result = await jmap.cleanupFastermailKeywords(archive.id);
+          totalCleaned += result.cleaned;
+          totalErrors += result.errors;
+        }
+
+        console.log(`Keyword cleanup complete. Cleaned: ${totalCleaned}, Errors: ${totalErrors}`);
+
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>Keyword Cleanup</title></head>
+          <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+            <h1 style="color: #22c55e;">Keyword Cleanup Complete</h1>
+            <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <p><strong>${totalCleaned}</strong> emails cleaned</p>
+              <p><strong>${totalErrors}</strong> errors</p>
+            </div>
+            <p style="color: #666;">The $fastermail_* keywords have been removed. You should now be able to manage emails normally.</p>
+          </body>
+          </html>
+        `);
+      } catch (err) {
+        console.error("Keyword cleanup error:", err);
+        res.writeHead(500, { "Content-Type": "text/html" });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>Error</title></head>
+          <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+            <h1>Error</h1>
+            <p>An error occurred: ${err}</p>
+          </body>
+          </html>
+        `);
+      }
     } else if (url.pathname === "/debug") {
       // Debug endpoint to show orphaned emails and digest status
       try {
