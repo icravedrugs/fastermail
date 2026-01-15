@@ -381,60 +381,6 @@ export class JMAPClient {
     }
   }
 
-  /**
-   * Remove all $fastermail_* keywords from emails to clean up keyword limit issues
-   */
-  async cleanupFastermailKeywords(mailboxId: string): Promise<{ cleaned: number; errors: number }> {
-    let cleaned = 0;
-    let errors = 0;
-
-    // Query emails in the mailbox
-    const emailIds = await this.queryEmails({ inMailbox: mailboxId }, { limit: 500 });
-    if (emailIds.length === 0) return { cleaned, errors };
-
-    // Get emails with keywords
-    const emails = await this.getEmails(emailIds, ["id", "keywords"]);
-
-    for (const email of emails) {
-      const fasterMailKeywords = Object.keys(email.keywords || {}).filter(k =>
-        k.startsWith("$fastermail_")
-      );
-
-      if (fasterMailKeywords.length === 0) continue;
-
-      // Build patch to remove all $fastermail_* keywords
-      const patch: Record<string, null> = {};
-      for (const keyword of fasterMailKeywords) {
-        patch[`keywords/${keyword}`] = null;
-      }
-
-      try {
-        const response = await this.request([
-          [
-            "Email/set",
-            {
-              accountId: this.accountId,
-              update: { [email.id]: patch },
-            },
-            "0",
-          ],
-        ]);
-
-        const result = response.methodResponses[0];
-        const setResult = result[1] as { notUpdated?: Record<string, unknown> };
-        if (result[0] === "error" || setResult?.notUpdated?.[email.id]) {
-          errors++;
-        } else {
-          cleaned++;
-        }
-      } catch {
-        errors++;
-      }
-    }
-
-    return { cleaned, errors };
-  }
-
   async moveEmail(emailId: string, toMailboxId: string): Promise<void> {
     const emails = await this.getEmails([emailId], ["mailboxIds"]);
     if (emails.length === 0) {
