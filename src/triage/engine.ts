@@ -292,6 +292,12 @@ export class TriageEngine {
     // Get the current pending digest to associate this email with
     const pendingDigest = await this.store.getPendingDigest();
 
+    // DEBUG: Log digest association for important/needs-reply emails
+    if (classification === "important" || classification === "needs-reply") {
+      const subject = email.subject?.slice(0, 40) || "(no subject)";
+      console.log(`   📌 DEBUG: ${classification} email "${subject}" -> digest ${pendingDigest.id} (status: ${pendingDigest.status})`);
+    }
+
     const processed: ProcessedEmail = {
       id: email.id,
       threadId: email.threadId,

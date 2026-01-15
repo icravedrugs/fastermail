@@ -596,4 +596,88 @@ export class Store {
       args: [newClassification, new Date().toISOString(), emailId],
     });
   }
+
+  // ============ Debug Methods ============
+
+  /**
+   * Get emails that might be "orphaned" - associated with digests that were sent but not cleaned.
+   * These emails would remain in Fastermail/* folders because the user never clicked archive.
+   */
+  async getOrphanedEmails(): Promise<{
+    digestId: number;
+    status: DigestStatus;
+    sentAt: string | null;
+    emails: ProcessedEmail[];
+  }[]> {
+    // Find digests that are in "sent" status (never cleaned)
+    const uncleanedDigests = await this.db.execute(
+      `SELECT * FROM digests WHERE status = 'sent' ORDER BY sent_at DESC`
+    );
+
+    const results: {
+      digestId: number;
+      status: DigestStatus;
+      sentAt: string | null;
+      emails: ProcessedEmail[];
+    }[] = [];
+
+    for (const row of uncleanedDigests.rows) {
+      const digestId = row.id as number;
+      const emails = await this.getEmailsByDigestId(digestId);
+      results.push({
+        digestId,
+        status: row.status as DigestStatus,
+        sentAt: row.sent_at as string | null,
+        emails,
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Debug: Get all digests and their email counts by classification
+   */
+  async getDigestDebugInfo(): Promise<{
+    id: number;
+    status: DigestStatus;
+    sentAt: string | null;
+    cleanedAt: string | null;
+    totalEmails: number;
+    byClassification: Record<string, number>;
+  }[]> {
+    const digests = await this.db.execute(
+      `SELECT * FROM digests ORDER BY id DESC LIMIT 20`
+    );
+
+    const results: {
+      id: number;
+      status: DigestStatus;
+      sentAt: string | null;
+      cleanedAt: string | null;
+      totalEmails: number;
+      byClassification: Record<string, number>;
+    }[] = [];
+
+    for (const row of digests.rows) {
+      const digestId = row.id as number;
+      const emails = await this.getEmailsByDigestId(digestId);
+
+      const byClassification: Record<string, number> = {};
+      for (const e of emails) {
+        byClassification[e.classification] = (byClassification[e.classification] || 0) + 1;
+      }
+
+      results.push({
+        id: digestId,
+        status: row.status as DigestStatus,
+        sentAt: row.sent_at as string | null,
+        cleanedAt: row.cleaned_at as string | null,
+        totalEmails: emails.length,
+        byClassification,
+      });
+    }
+
+    return results;
+  }
 }

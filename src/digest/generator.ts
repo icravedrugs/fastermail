@@ -51,15 +51,27 @@ export class DigestGenerator {
     // Get all emails associated with this digest
     const emails = await this.store.getEmailsByDigestId(pendingDigest.id);
 
-    // Filter to only archived/low-priority emails
-    // Also exclude emails from the user's own address (previous digests)
+    // Include ALL triaged emails in digest, except emails from the user's own address (previous digests)
     const digestEmails = emails.filter(
-      (e) =>
-        (e.classification === "low-priority" ||
-          e.classification === "fyi" ||
-          e.actionTaken === "archived") &&
-        e.fromEmail.toLowerCase() !== this.config.userEmail.toLowerCase()
+      (e) => e.fromEmail.toLowerCase() !== this.config.userEmail.toLowerCase()
     );
+
+    // DEBUG: Log breakdown of emails in digest by classification
+    if (digestEmails.length > 0) {
+      const byClassification: Record<string, number> = {};
+      for (const e of digestEmails) {
+        byClassification[e.classification] = (byClassification[e.classification] || 0) + 1;
+      }
+      console.log(`📧 DEBUG: Digest includes ${digestEmails.length} emails: ${JSON.stringify(byClassification)}`);
+    }
+
+    // Log any emails excluded (should only be from-self)
+    const excludedEmails = emails.filter(
+      (e) => e.fromEmail.toLowerCase() === this.config.userEmail.toLowerCase()
+    );
+    if (excludedEmails.length > 0) {
+      console.log(`   Excluded ${excludedEmails.length} emails from self (digest emails)`);
+    }
 
     if (digestEmails.length === 0) {
       console.log("No emails to include in digest");
