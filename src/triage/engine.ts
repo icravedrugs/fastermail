@@ -145,12 +145,6 @@ export class TriageEngine {
       }
     }
 
-    // DEBUG: Log if we found emails in inbox that are already processed
-    const alreadyProcessedCount = emailIds.length - unprocessedIds.length;
-    if (alreadyProcessedCount > 0) {
-      console.log(`   📋 DEBUG: ${alreadyProcessedCount} emails in inbox are already processed (skipped)`);
-    }
-
     if (unprocessedIds.length === 0) {
       return [];
     }
@@ -169,16 +163,6 @@ export class TriageEngine {
       const fromEmail = email.from?.[0]?.email?.toLowerCase();
       const isFromSelf = fromEmail === this.config.userEmail.toLowerCase();
       const alreadyLabeled = this.labelManager.hasAnyClassificationMailbox(email.mailboxIds);
-
-      // DEBUG: Log why emails are being skipped or processed
-      if (isFromSelf) {
-        console.log(`   🚫 DEBUG: Skipping "${email.subject?.slice(0, 40)}" - from self`);
-      } else if (alreadyLabeled) {
-        console.log(`   🚫 DEBUG: Skipping "${email.subject?.slice(0, 40)}" - already has classification label`);
-      } else {
-        console.log(`   ✅ DEBUG: Will process "${email.subject?.slice(0, 40)}" (id: ${email.id})`);
-      }
-
       return !isFromSelf && !alreadyLabeled;
     });
 
@@ -198,15 +182,6 @@ export class TriageEngine {
 
     for (const email of emailsToProcess) {
       try {
-        // Double-check: skip if already in database (defensive check)
-        const existingRecord = await this.store.getProcessedEmail(email.id);
-        if (existingRecord) {
-          console.log(`   ⚠️  WARNING: Email "${email.subject?.slice(0, 40)}" (${email.id}) is already in database!`);
-          console.log(`      Previous classification: ${existingRecord.classification}, processed at: ${existingRecord.processedAt}`);
-          console.log(`      Skipping to prevent re-labeling. This should not happen!`);
-          continue;
-        }
-
         const result = await this.processEmail(email, classifierConfig);
         results.push(result);
       } catch (error) {
@@ -319,12 +294,6 @@ export class TriageEngine {
   ): Promise<void> {
     // Get the current pending digest to associate this email with
     const pendingDigest = await this.store.getPendingDigest();
-
-    // DEBUG: Log digest association for important/needs-reply emails
-    if (classification === "important" || classification === "needs-reply") {
-      const subject = email.subject?.slice(0, 40) || "(no subject)";
-      console.log(`   📌 DEBUG: ${classification} email "${subject}" -> digest ${pendingDigest.id} (status: ${pendingDigest.status})`);
-    }
 
     const processed: ProcessedEmail = {
       id: email.id,

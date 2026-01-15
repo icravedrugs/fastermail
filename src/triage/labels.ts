@@ -86,7 +86,6 @@ export class LabelManager {
     // Add to the new classification mailbox
     const mailboxId = this.labelMailboxIds.get(classification);
     if (mailboxId) {
-      console.log(`   🏷️  DEBUG: Applying label "${classification}" to email ${emailId}`);
       await this.jmap.addEmailToMailbox(emailId, mailboxId);
     }
   }

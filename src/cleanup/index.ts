@@ -44,16 +44,6 @@ export async function runCleanup(
   // Get all emails associated with this digest
   const emails = await store.getEmailsByDigestId(digest.id);
 
-  // DEBUG: Log breakdown of emails associated with this digest
-  console.log(`\n🔍 DEBUG Cleanup: Digest ${digest.id} has ${emails.length} total emails in database`);
-  if (emails.length > 0) {
-    const byClassification: Record<string, number> = {};
-    for (const e of emails) {
-      byClassification[e.classification] = (byClassification[e.classification] || 0) + 1;
-    }
-    console.log(`   By classification: ${JSON.stringify(byClassification)}`);
-  }
-
   if (emails.length === 0) {
     await store.markDigestCleaned(digest.id);
     return {
