@@ -222,8 +222,11 @@ export class TriageEngine {
       classification.classification
     );
 
-    // Remove from inbox (keep only in triage folder)
-    if (this.inboxId) {
+    // Remove from inbox only for low-priority and fyi emails
+    // Important and needs-reply emails stay in inbox for visibility
+    if (this.inboxId &&
+        classification.classification !== "important" &&
+        classification.classification !== "needs-reply") {
       await this.jmap.removeEmailFromMailbox(email.id, this.inboxId);
     }
 
