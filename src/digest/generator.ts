@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Store, ProcessedEmail } from "../db/index.js";
-import type { JMAPClient } from "../jmap/index.js";
+import type { JMAPClient, Email } from "../jmap/index.js";
 import { applySummaryStrategy, requiresEmailBody, type DigestItem } from "./strategies.js";
 import type { ExtractedLink } from "./link-extractor.js";
 
@@ -156,9 +156,12 @@ export class DigestGenerator {
 
     for (const email of emails) {
       try {
-        // Check if we need to fetch full email body for this content format
+        // Fetch email body if:
+        // 1. Content format requires it (link_collection, article, transactional)
+        // 2. OR this is a newsletter (always check for links as fallback)
+        const isNewsletter = category === "newsletters";
         let emailBody = null;
-        if (requiresEmailBody(email.contentFormat)) {
+        if (requiresEmailBody(email.contentFormat) || isNewsletter) {
           try {
             emailBody = await this.jmap.getEmailBody(email.id);
           } catch (error) {
@@ -167,7 +170,24 @@ export class DigestGenerator {
         }
 
         // Apply the appropriate strategy
-        const item = await applySummaryStrategy(email, emailBody, this.client);
+        let item = await applySummaryStrategy(email, emailBody, this.client);
+
+        // For newsletters not classified as link_collection, try extracting links anyway
+        // This catches link roundups that weren't detected during classification
+        if (isNewsletter && !item.links?.length && emailBody) {
+          const html = this.getEmailBodyHtml(emailBody);
+          if (html) {
+            // Use extractStoryLinks which scores links by quality and filters generic ones
+            const { extractStoryLinks } = await import("./link-extractor.js");
+            const links = extractStoryLinks(html, 10);
+            // Only add links if we found a meaningful number of quality links (5+)
+            // This avoids false positives from newsletters with just nav/footer links
+            if (links.length >= 5) {
+              item = { ...item, links };
+            }
+          }
+        }
+
         results.push({
           emailId: item.emailId,
           threadId: item.threadId,
@@ -190,6 +210,18 @@ export class DigestGenerator {
     }
 
     return results;
+  }
+
+  private getEmailBodyHtml(email: Email): string | null {
+    if (!email.bodyValues || !email.htmlBody) return null;
+
+    for (const part of email.htmlBody) {
+      if (part.partId && email.bodyValues[part.partId]) {
+        return email.bodyValues[part.partId].value;
+      }
+    }
+
+    return null;
   }
 
   private formatCategoryTitle(category: string): string {

@@ -132,8 +132,12 @@ IMPORTANT RULES:
 
 CONTENT FORMATS (for digest summarization):
 - "standard": Normal email, default treatment
-- "link_collection": Newsletter/email with multiple curated links to articles/stories
-- "article": Long-form content, essay, or opinion piece
+- "link_collection": Newsletter with curated links to external articles/stories. DETECT BY:
+  * Subject contains "links", "roundup", "assorted links", "weekly links", "daily links"
+  * Preview mentions multiple distinct topics/stories (e.g., "AI news, economics, new study on X")
+  * Newsletter format listing several items/articles to read
+  * Examples: Marginal Revolution "assorted links", AlphaSignal daily digest, Hacker News digest
+- "article": Long-form content, essay, or opinion piece - a SINGLE article/post to read
 - "announcement": Public/broadcast message, community call, not personal to recipient
 - "transactional": Receipt, confirmation, order status, shipping update
 
