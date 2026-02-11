@@ -172,9 +172,10 @@ export class DigestGenerator {
         // Apply the appropriate strategy
         let item = await applySummaryStrategy(email, emailBody, this.client);
 
-        // For newsletters not classified as link_collection, try extracting links anyway
+        // For newsletters classified as "standard", try extracting links anyway
         // This catches link roundups that weren't detected during classification
-        if (isNewsletter && !item.links?.length && emailBody) {
+        // Skip "article", "announcement", "transactional" which have their own strategies
+        if (isNewsletter && email.contentFormat === "standard" && !item.links?.length && emailBody) {
           const html = this.getEmailBodyHtml(emailBody);
           if (html) {
             // Use extractStoryLinks which scores links by quality and filters generic ones

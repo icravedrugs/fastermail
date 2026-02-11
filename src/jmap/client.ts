@@ -231,19 +231,37 @@ export class JMAPClient {
   }
 
   async getEmailBody(id: string): Promise<Email> {
-    const emails = await this.getEmails([id], [
-      "id",
-      "from",
-      "to",
-      "cc",
-      "subject",
-      "receivedAt",
-      "preview",
-      "bodyValues",
-      "textBody",
-      "htmlBody",
+    const response = await this.request([
+      [
+        "Email/get",
+        {
+          accountId: this.accountId,
+          ids: [id],
+          properties: [
+            "id",
+            "from",
+            "to",
+            "cc",
+            "subject",
+            "receivedAt",
+            "preview",
+            "bodyValues",
+            "textBody",
+            "htmlBody",
+          ],
+          fetchHTMLBodyValues: true,
+          fetchTextBodyValues: true,
+        },
+        "0",
+      ],
     ]);
 
+    const result = response.methodResponses[0];
+    if (result[0] === "error") {
+      throw new Error(`Email/get failed: ${JSON.stringify(result[1])}`);
+    }
+
+    const emails = (result[1] as { list: Email[] }).list;
     if (emails.length === 0) {
       throw new Error(`Email not found: ${id}`);
     }

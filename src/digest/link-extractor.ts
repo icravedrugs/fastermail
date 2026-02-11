@@ -42,6 +42,14 @@ const SKIP_TEXTS = [
   "forward",
   "©",
   "copyright",
+  "read on blog",
+  "read in browser",
+  "view online",
+  "register now",
+  "sign up",
+  "subscribe",
+  "powered by",
+  "sent by",
 ];
 
 // Extract href value from an anchor tag
