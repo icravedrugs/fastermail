@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Store, ProcessedEmail } from "../db/index.js";
 import type { JMAPClient, Email } from "../jmap/index.js";
-import { applySummaryStrategy, requiresEmailBody, type DigestItem } from "./strategies.js";
+import { applySummaryStrategy, requiresEmailBody, extractLinksWithLLM, type DigestItem } from "./strategies.js";
 import type { ExtractedLink } from "./link-extractor.js";
 
 export interface DigestConfig {
@@ -172,19 +172,24 @@ export class DigestGenerator {
         // Apply the appropriate strategy
         let item = await applySummaryStrategy(email, emailBody, this.client);
 
-        // For newsletters classified as "standard", try extracting links anyway
+        // For newsletters classified as "standard", try LLM link extraction anyway
         // This catches link roundups that weren't detected during classification
-        // Skip "article", "announcement", "transactional" which have their own strategies
         if (isNewsletter && email.contentFormat === "standard" && !item.links?.length && emailBody) {
           const html = this.getEmailBodyHtml(emailBody);
           if (html) {
-            // Use extractStoryLinks which scores links by quality and filters generic ones
-            const { extractStoryLinks } = await import("./link-extractor.js");
-            const links = extractStoryLinks(html, 10);
-            // Only add links if we found a meaningful number of quality links (5+)
-            // This avoids false positives from newsletters with just nav/footer links
-            if (links.length >= 5) {
-              item = { ...item, links };
+            try {
+              const emailText = this.getEmailBodyText(emailBody);
+              const links = await extractLinksWithLLM(
+                html,
+                emailText,
+                email.subject || "",
+                this.client
+              );
+              if (links.length > 0) {
+                item = { ...item, links };
+              }
+            } catch (error) {
+              console.error("LLM link extraction failed for newsletter fallback:", error);
             }
           }
         }
@@ -211,6 +216,30 @@ export class DigestGenerator {
     }
 
     return results;
+  }
+
+  private getEmailBodyText(email: Email): string {
+    if (!email.bodyValues) return email.preview || "";
+    if (email.textBody) {
+      for (const part of email.textBody) {
+        if (part.partId && email.bodyValues[part.partId]) {
+          return email.bodyValues[part.partId].value;
+        }
+      }
+    }
+    if (email.htmlBody) {
+      for (const part of email.htmlBody) {
+        if (part.partId && email.bodyValues[part.partId]) {
+          return email.bodyValues[part.partId].value
+            .replace(/<[^>]+>/g, " ")
+            .replace(/&nbsp;/g, " ")
+            .replace(/&amp;/g, "&")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+      }
+    }
+    return email.preview || "";
   }
 
   private getEmailBodyHtml(email: Email): string | null {

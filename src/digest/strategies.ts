@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ProcessedEmail, ContentFormat } from "../db/index.js";
 import type { Email } from "../jmap/index.js";
-import { extractLinksWithContext, type ExtractedLink } from "./link-extractor.js";
+import { extractLinks, type ExtractedLink } from "./link-extractor.js";
 
 export interface DigestItem {
   emailId: string;
@@ -85,20 +85,118 @@ function applyStandardStrategy(
 }
 
 /**
- * Apply the link_collection strategy
- * Extracts story links from the email body with context/descriptions
+ * Use an LLM to identify curated content links from a newsletter.
+ * Filters out navigation, social, ads, etc. and returns clean titles + descriptions.
  */
-function applyLinkCollectionStrategy(
+export async function extractLinksWithLLM(
+  html: string,
+  emailText: string,
+  subject: string,
+  client: Anthropic
+): Promise<ExtractedLink[]> {
+  // Get all raw links from the HTML
+  const rawLinks = extractLinks(html);
+  if (rawLinks.length === 0) return [];
+
+  // Build the numbered link list for the prompt
+  const linkList = rawLinks
+    .map((link, i) => `${i + 1}. "${link.title}" -> ${link.url}`)
+    .join("\n");
+
+  const response = await client.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 1000,
+    messages: [
+      {
+        role: "user",
+        content: `You are analyzing a newsletter email to find the curated content links.
+
+From the list of links extracted from this email, identify ONLY the links that point to curated articles, stories, or external content that the newsletter is recommending to readers.
+
+EXCLUDE:
+- Navigation links (homepage, signup, login, "read on blog", "reader")
+- Social media links (follow on X/Twitter, YouTube, Instagram, etc.)
+- Unsubscribe, manage preferences, view in browser
+- Author byline links, "about us", "advertise with us"
+- Feedback/rating links (awesome, decent, not great)
+- Self-referential links (link to the newsletter itself or its title)
+- Sponsored/ad links UNLESS they are clearly presented as content
+
+For each content link, return:
+- index: the link number from the list below (1-indexed)
+- title: a clean, descriptive title for the link
+- description: one sentence about what the linked content covers
+
+EMAIL SUBJECT: ${subject}
+
+EMAIL TEXT (first 3000 chars):
+${emailText.slice(0, 3000)}
+
+EXTRACTED LINKS:
+${linkList}
+
+Respond with ONLY a JSON array, no other text:
+[{"index": 1, "title": "...", "description": "..."}, ...]
+
+If no curated content links are found, respond with: []`,
+      },
+    ],
+  });
+
+  const text = response.content[0].type === "text" ? response.content[0].text : "";
+  if (!text) return [];
+
+  try {
+    // Extract JSON from response (handle markdown code blocks)
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+
+    const parsed = JSON.parse(jsonMatch[0]) as Array<{
+      index: number;
+      title: string;
+      description: string;
+    }>;
+
+    // Map back to ExtractedLink with original URLs
+    return parsed
+      .filter((item) => item.index >= 1 && item.index <= rawLinks.length)
+      .map((item) => ({
+        title: item.title,
+        url: rawLinks[item.index - 1].url,
+        description: item.description || undefined,
+      }));
+  } catch (error) {
+    console.error("Failed to parse LLM link extraction response:", error);
+    return [];
+  }
+}
+
+/**
+ * Apply the link_collection strategy
+ * Uses LLM to identify curated content links from the email body
+ */
+async function applyLinkCollectionStrategy(
   processedEmail: ProcessedEmail,
-  emailBody: Email | null
-): DigestItem {
+  emailBody: Email | null,
+  client: Anthropic
+): Promise<DigestItem> {
   let links: ExtractedLink[] = [];
 
   if (emailBody) {
     const html = getEmailBodyHtml(emailBody);
     if (html) {
-      // Use extractLinksWithContext to get links with descriptions
-      links = extractLinksWithContext(html).slice(0, 10);
+      const emailText = getEmailBodyText(emailBody);
+      try {
+        links = await extractLinksWithLLM(
+          html,
+          emailText,
+          processedEmail.subject || "",
+          client
+        );
+      } catch (error) {
+        console.error("LLM link extraction failed, falling back to basic extraction:", error);
+        links = extractLinks(html).slice(0, 10);
+      }
     }
   }
 
@@ -262,7 +360,7 @@ export async function applySummaryStrategy(
 
   switch (format) {
     case "link_collection":
-      return applyLinkCollectionStrategy(processedEmail, emailBody);
+      return await applyLinkCollectionStrategy(processedEmail, emailBody, client);
 
     case "article":
       return await applyArticleStrategy(processedEmail, emailBody, client);
