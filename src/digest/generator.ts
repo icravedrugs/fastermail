@@ -84,8 +84,8 @@ export class DigestGenerator {
       ? `${this.config.baseUrl}/cleanup?token=${pendingDigest.cleanupToken}`
       : null;
 
-    const htmlBody = this.generateHtml(sections, cleanupUrl);
-    const textBody = this.generateText(sections, cleanupUrl);
+    const htmlBody = this.generateHtml(sections, cleanupUrl, this.config.baseUrl);
+    const textBody = this.generateText(sections, cleanupUrl, this.config.baseUrl);
 
     return {
       id: pendingDigest.id,
@@ -274,7 +274,7 @@ export class DigestGenerator {
       .replace(/'/g, "&#39;");
   }
 
-  private generateHtml(sections: DigestSection[], cleanupUrl: string | null): string {
+  private generateHtml(sections: DigestSection[], cleanupUrl: string | null, baseUrl?: string): string {
     const sectionHtml = sections
       .filter((s) => s.items.length > 0)
       .map(
@@ -288,6 +288,11 @@ export class DigestGenerator {
               .map(
                 (item) => {
                   const fastmailUrl = `https://app.fastmail.com/mail/Inbox/${item.threadId}.${item.emailId}`;
+                  const actionLinks = baseUrl ? `
+                <div style="margin-top: 6px; font-size: 12px;">
+                  <a href="${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=delete" style="color: #999; text-decoration: none;">[delete]</a>
+                  <a href="${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=inbox" style="color: #999; text-decoration: none; margin-left: 8px;">[inbox]</a>
+                </div>` : "";
                   return `
               <li style="margin-bottom: 12px; padding: 12px; background: #f9f9f9; border-radius: 8px;">
                 <div style="font-weight: 600;">
@@ -304,7 +309,7 @@ export class DigestGenerator {
                     </div>
                   `).join("")}
                 </div>
-                ` : ""}
+                ` : ""}${actionLinks}
               </li>
             `;
                 }
@@ -343,7 +348,7 @@ export class DigestGenerator {
 </html>`;
   }
 
-  private generateText(sections: DigestSection[], cleanupUrl: string | null): string {
+  private generateText(sections: DigestSection[], cleanupUrl: string | null, baseUrl?: string): string {
     const sectionText = sections
       .filter((s) => s.items.length > 0)
       .map(
@@ -361,6 +366,10 @@ export class DigestGenerator {
                     text += `\n      ${link.description}`;
                   }
                 }
+              }
+              if (baseUrl) {
+                text += `\n  Actions: [delete] ${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=delete`;
+                text += `\n           [inbox] ${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=inbox`;
               }
               return text;
             })

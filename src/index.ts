@@ -216,6 +216,60 @@ async function main(): Promise<void> {
           </html>
         `);
       }
+    } else if (url.pathname === "/email-action" && req.method === "GET") {
+      const emailId = url.searchParams.get("id");
+      const op = url.searchParams.get("op");
+
+      if (!emailId || !op || (op !== "delete" && op !== "inbox")) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>Error</title></head>
+          <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+            <h1>Invalid Request</h1>
+            <p>Missing or invalid parameters. Required: id and op (delete or inbox).</p>
+          </body>
+          </html>
+        `);
+        return;
+      }
+
+      try {
+        const role = op === "delete" ? "trash" : "inbox";
+        const mailbox = await jmap.findMailboxByRole(role);
+        if (!mailbox) {
+          throw new Error(`${role} mailbox not found`);
+        }
+        await jmap.moveEmail(emailId, mailbox.id);
+
+        const label = op === "delete" ? "Deleted" : "Moved to Inbox";
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>${label}</title></head>
+          <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+            <h1 style="color: #22c55e;">${label}</h1>
+            <p style="color: #666;">You can close this tab.</p>
+            <script>setTimeout(() => window.close(), 1500)</script>
+          </body>
+          </html>
+        `);
+      } catch (err) {
+        console.error("Email action error:", err);
+        res.writeHead(500, { "Content-Type": "text/html" });
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>Error</title></head>
+          <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+            <h1>Error</h1>
+            <p>Failed to ${op === "delete" ? "delete" : "move"} the email. It may have already been moved.</p>
+          </body>
+          </html>
+        `);
+      }
     } else if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
