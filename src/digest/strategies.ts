@@ -88,6 +88,117 @@ function applyStandardStrategy(
  * Use an LLM to identify curated content links from a newsletter.
  * Filters out navigation, social, ads, etc. and returns clean titles + descriptions.
  */
+/**
+ * Check that a URL is a safe public HTTPS URL (not internal/private).
+ * Prevents SSRF via malicious redirect targets.
+ */
+function isSafePublicUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Block localhost, loopback, and link-local
+    if (
+      hostname === "localhost" ||
+      hostname.startsWith("127.") ||
+      hostname.startsWith("10.") ||
+      hostname.startsWith("192.168.") ||
+      hostname === "[::1]" ||
+      hostname.startsWith("169.254.") ||
+      hostname.startsWith("0.")
+    ) {
+      return false;
+    }
+
+    // Block 172.16.0.0/12 private range
+    if (hostname.startsWith("172.")) {
+      const second = parseInt(hostname.split(".")[1], 10);
+      if (second >= 16 && second <= 31) return false;
+    }
+
+    // Block cloud metadata endpoints
+    if (hostname === "metadata.google.internal") return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve redirect/tracking URLs to their actual destinations.
+ * Many newsletters (especially Substack) wrap all links in opaque redirect URLs.
+ * Resolving them gives us readable destination URLs that help the LLM correctly
+ * match titles to links.
+ */
+async function resolveRedirectUrls(
+  links: ExtractedLink[]
+): Promise<ExtractedLink[]> {
+  // Allowlist of known newsletter redirect service domains.
+  // Only these domains are fetched — prevents SSRF via attacker-controlled domains
+  // that happen to match loose patterns like "click.*".
+  const allowedRedirectDomains = [
+    "substack.com",
+    "list-manage.com",
+    "mailchimp.com",
+    "convertkit.com",
+    "sendinblue.com",
+    "brevo.com",
+    "mailgun.net",
+    "sendgrid.net",
+    "constantcontact.com",
+    "campaign-archive.com",
+    "marginalrevolution.com",
+  ];
+
+  function isAllowedRedirectUrl(url: string): boolean {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return allowedRedirectDomains.some(
+        (domain) => hostname === domain || hostname.endsWith(`.${domain}`)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  const needsResolving = links.some((link) => isAllowedRedirectUrl(link.url));
+
+  if (!needsResolving) return links;
+
+  const resolved = await Promise.all(
+    links.map(async (link) => {
+      if (!isAllowedRedirectUrl(link.url)) return link;
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+
+        const response = await fetch(link.url, {
+          method: "HEAD",
+          redirect: "manual",
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        const location = response.headers.get("location");
+        if (location && isSafePublicUrl(location)) {
+          return { ...link, url: location };
+        }
+      } catch {
+        // Keep original URL on failure
+      }
+
+      return link;
+    })
+  );
+
+  return resolved;
+}
+
 export async function extractLinksWithLLM(
   html: string,
   emailText: string,
@@ -98,8 +209,12 @@ export async function extractLinksWithLLM(
   const rawLinks = extractLinks(html);
   if (rawLinks.length === 0) return [];
 
+  // Resolve redirect URLs to actual destinations so the LLM can see
+  // readable URLs (e.g. "anthropic.com/research/..." instead of "substack.com/redirect/UUID")
+  const resolvedLinks = await resolveRedirectUrls(rawLinks);
+
   // Build the numbered link list for the prompt
-  const linkList = rawLinks
+  const linkList = resolvedLinks
     .map((link, i) => `${i + 1}. "${link.title}" -> ${link.url}`)
     .join("\n");
 
@@ -157,12 +272,12 @@ If no curated content links are found, respond with: []`,
       description: string;
     }>;
 
-    // Map back to ExtractedLink with original URLs
+    // Map back to ExtractedLink with resolved URLs
     return parsed
-      .filter((item) => item.index >= 1 && item.index <= rawLinks.length)
+      .filter((item) => item.index >= 1 && item.index <= resolvedLinks.length)
       .map((item) => ({
         title: item.title,
-        url: rawLinks[item.index - 1].url,
+        url: resolvedLinks[item.index - 1].url,
         description: item.description || undefined,
       }));
   } catch (error) {
