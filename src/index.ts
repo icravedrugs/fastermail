@@ -382,11 +382,19 @@ async function main(): Promise<void> {
 
     } else if (url.pathname === "/webhooks/readwise" && req.method === "POST") {
       // Readwise webhook endpoint — receives reading events
-      let body = "";
-      req.on("data", (chunk) => { body += chunk; });
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk) => { chunks.push(Buffer.from(chunk)); });
       req.on("end", async () => {
         try {
+          const body = Buffer.concat(chunks).toString("utf-8");
+          if (!body || body.trim().length === 0) {
+            // Readwise sends empty test pings — acknowledge them
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ processed: true, reason: "ping acknowledged" }));
+            return;
+          }
           const event = JSON.parse(body);
+          console.log(`Readwise webhook: ${event.type || "unknown"}`);
           const result = await processWebhookEvent(event, store);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(result));
