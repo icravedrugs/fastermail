@@ -361,22 +361,36 @@ export class TriageEngine {
     // Get recent tier corrections for few-shot learning
     const corrections = await this.store.getRecentTierCorrections(20);
 
-    // Extract and classify items
-    const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
+    // Decide essay vs link-collection BEFORE extraction.
+    // Articles contain reference links but the value is the essay itself — forward it whole.
+    // Only link_collection format should go through link extraction.
+    const isEssay = classification.contentFormat !== "link_collection";
 
-    // Check if this is an essay newsletter (no extracted links = essay format)
-    const isEssay = items.length === 0 || (items.length === 1 && classification.contentFormat === "article");
+    if (isEssay) {
+      // Classify the essay's relevance without extracting links
+      const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
+      const essayTier = items.length >= 1 ? items[0].tier : "nice-to-have";
+      const essayTopic = items.length >= 1 ? items[0].topic : "general";
+      const essayConfidence = items.length >= 1 ? items[0].confidence : 0.5;
+      const essayReason = items.length >= 1 ? items[0].reason : "Essay newsletter";
 
-    // For essay newsletters with a Readwise forward address: forward the email instead of URL saving.
-    // This preserves full paid content (Substack etc.) that would be paywalled via URL.
-    if (isEssay && this.readwiseForwardEmail && items.length <= 1) {
-      const essayTier = items.length === 1 ? items[0].tier : "nice-to-have";
-      const essayTopic = items.length === 1 ? items[0].topic : "general";
-      const essayConfidence = items.length === 1 ? items[0].confidence : 0.5;
-      const essayReason = items.length === 1 ? items[0].reason : "Essay newsletter forwarded to Readwise";
+      // Store as single item in DB (for stats and correction UI)
+      await this.store.saveNewsletterItem({
+        emailId: email.id,
+        url: `forwarded:${email.id}`,
+        title: email.subject || "(no subject)",
+        description: classification.contentSummary || "",
+        tier: essayTier as any,
+        topicTag: essayTopic,
+        confidence: essayConfidence,
+        reason: essayReason,
+        readwiseStatus: essayTier !== "skip" ? "saved" : null,
+        readwiseDocId: null,
+        retryCount: 0,
+        nextRetryAfter: null,
+      });
 
-      if (essayTier !== "skip") {
-        // Forward the email to Readwise inbox
+      if (essayTier !== "skip" && this.readwiseForwardEmail) {
         try {
           const draftId = await this.jmap.createDraft({
             to: [{ email: this.readwiseForwardEmail }],
@@ -391,25 +405,10 @@ export class TriageEngine {
         }
       }
 
-      // Store as newsletter item in DB (for stats and correction UI)
-      await this.store.saveNewsletterItem({
-        emailId: email.id,
-        url: `forwarded:${email.id}`,
-        title: email.subject || "(no subject)",
-        description: classification.contentSummary || "",
-        tier: essayTier as any,
-        topicTag: essayTopic,
-        confidence: essayConfidence,
-        reason: essayReason,
-        readwiseStatus: essayTier !== "skip" ? "saved" : null,
-        readwiseDocId: null, // Forwarded emails don't have a doc ID
-        retryCount: 0,
-        nextRetryAfter: null,
-      });
-
       console.log(`  [newsletter:essay] ${email.subject?.slice(0, 50)} → ${essayTier}`);
     } else {
-      // Link-based newsletter: save individual links to Readwise
+      // Link-collection: extract and classify individual links
+      const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
       const saveResult = await saveItemsToReadwise(
         items,
         email.id,
