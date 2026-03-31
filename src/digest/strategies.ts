@@ -163,6 +163,8 @@ async function resolveRedirectUrls(
     "trk.klclick.com",
     "links.tldrnewsletter.com",
     "tracking.tldrnewsletter.com",
+    "alphasignal.ai",
+    "app.alphasignal.ai",
   ];
 
   function isAllowedRedirectUrl(url: string): boolean {
@@ -188,11 +190,23 @@ async function resolveRedirectUrls(
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
 
-        const response = await fetch(link.url, {
+        let response = await fetch(link.url, {
           method: "HEAD",
           redirect: "manual",
           signal: controller.signal,
         });
+
+        // Some services (AlphaSignal) block HEAD but allow GET
+        if (response.status === 403) {
+          const controller2 = new AbortController();
+          const timeout2 = setTimeout(() => controller2.abort(), 5000);
+          response = await fetch(link.url, {
+            method: "GET",
+            redirect: "manual",
+            signal: controller2.signal,
+          });
+          clearTimeout(timeout2);
+        }
 
         clearTimeout(timeout);
 
