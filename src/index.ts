@@ -8,6 +8,10 @@ import { ProfileManager } from "./sender/index.js";
 import { TriageEngine, LabelManager } from "./triage/index.js";
 import { DigestScheduler } from "./digest/index.js";
 import { runCleanup } from "./cleanup/index.js";
+import { ReadwiseClient } from "./readwise/index.js";
+import { renderCorrectionsPage, renderCorrectionSuccess, renderTokenError } from "./newsletter/corrections-ui.js";
+import { saveItemsToReadwise } from "./newsletter/sync.js";
+import { processWebhookEvent } from "./newsletter/feedback.js";
 
 function validateSettings(): void {
   const required = [
@@ -55,6 +59,13 @@ async function main(): Promise<void> {
   if (baseUrl) {
     console.log(`Base URL: ${baseUrl}`);
   }
+  if (process.env.READWISE_TOKEN) {
+    console.log("Readwise integration enabled");
+  }
+  if (process.env.READWISE_FORWARD_EMAIL) {
+    console.log(`Readwise forward: ${process.env.READWISE_FORWARD_EMAIL}`);
+  }
+  console.log("Reader profile: ./reader-profile.md");
 
   // Initialize database
   const dbClient = createDbClient();
@@ -103,10 +114,13 @@ async function main(): Promise<void> {
 
   // Initialize triage engine
   const triageEngine = new TriageEngine(jmap, store, profileManager, {
-    mode: "label-only", // Start in safe mode
+    mode: "label-only",
     anthropicApiKey: process.env.ANTHROPIC_API_KEY!,
     pollIntervalSeconds: pollInterval,
     userEmail,
+    readwiseToken: process.env.READWISE_TOKEN,
+    readerProfilePath: "./reader-profile.md",
+    readwiseForwardEmail: process.env.READWISE_FORWARD_EMAIL,
   });
 
   await triageEngine.initialize();
@@ -123,6 +137,9 @@ async function main(): Promise<void> {
     baseUrl,
     instanceId,
   });
+
+  // Initialize Readwise client for correction UI retroactive saves
+  const readwise = process.env.READWISE_TOKEN ? new ReadwiseClient(process.env.READWISE_TOKEN) : null;
 
   // Start triage engine
   console.log("\nStarting triage engine...");
@@ -270,6 +287,117 @@ async function main(): Promise<void> {
           </html>
         `);
       }
+    } else if (url.pathname === "/corrections" && req.method === "GET") {
+      const token = url.searchParams.get("token");
+      if (!token) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(renderTokenError(false));
+        return;
+      }
+
+      const validation = await store.validateCorrectionToken(token);
+      if (!validation.valid) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(renderTokenError(true));
+        return;
+      }
+
+      const items = await store.getNewsletterItemsByDigest(validation.digestId!);
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(renderCorrectionsPage(items, token, baseUrl || `http://localhost:${port}`));
+
+    } else if (url.pathname === "/corrections/update" && req.method === "GET") {
+      const token = url.searchParams.get("token");
+      const itemId = url.searchParams.get("item");
+      const newTier = url.searchParams.get("tier");
+
+      if (!token || !itemId || !newTier) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(renderTokenError(false));
+        return;
+      }
+
+      const validation = await store.validateCorrectionToken(token);
+      if (!validation.valid) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end(renderTokenError(true));
+        return;
+      }
+
+      const item = await store.getNewsletterItem(parseInt(itemId, 10));
+      if (!item) {
+        res.writeHead(404, { "Content-Type": "text/html" });
+        res.end("<html><body>Item not found</body></html>");
+        return;
+      }
+
+      const validTiers = ["must-read", "nice-to-have", "skip"];
+      if (!validTiers.includes(newTier)) {
+        res.writeHead(400, { "Content-Type": "text/html" });
+        res.end("<html><body>Invalid tier</body></html>");
+        return;
+      }
+
+      // Save correction
+      await store.saveTierCorrection({
+        itemId: item.id,
+        originalTier: item.tier,
+        correctedTier: newTier as any,
+      });
+
+      // Update the item's tier
+      await store.updateNewsletterItemTier(item.id, newTier as any);
+
+      // Retroactive Readwise action
+      if (readwise) {
+        if ((newTier === "must-read" || newTier === "nice-to-have") && item.readwiseStatus !== "saved") {
+          // Promote: save to Readwise
+          try {
+            const result = await readwise.save({
+              url: item.url,
+              title: item.title || undefined,
+              tags: [`tier:${newTier}`, item.topicTag ? `topic:${item.topicTag}` : ""].filter(Boolean),
+              location: newTier === "must-read" ? "new" : "later",
+              saved_using: "fastermail",
+            });
+            await store.updateNewsletterItemReadwise(item.id, "saved", result.id, 0, null);
+          } catch (error) {
+            console.error("Retroactive Readwise save failed:", error);
+          }
+        } else if (newTier === "skip" && item.readwiseDocId) {
+          // Demote: delete from Readwise
+          try {
+            await readwise.delete(item.readwiseDocId);
+            await store.updateNewsletterItemReadwise(item.id, "pending", null, 0, null);
+          } catch (error) {
+            console.error("Readwise delete failed:", error);
+          }
+        }
+      }
+
+      // Update item for response
+      const updatedItem = { ...item, tier: newTier as any };
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(renderCorrectionSuccess(updatedItem, newTier, token, baseUrl || `http://localhost:${port}`));
+
+    } else if (url.pathname === "/webhooks/readwise" && req.method === "POST") {
+      // Readwise webhook endpoint — receives reading events
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", async () => {
+        try {
+          const event = JSON.parse(body);
+          const result = await processWebhookEvent(event, store);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          console.error("Webhook processing error:", err);
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ processed: false, reason: "invalid payload" }));
+        }
+      });
+      return;
+
     } else if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));

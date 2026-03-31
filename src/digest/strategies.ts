@@ -151,6 +151,18 @@ async function resolveRedirectUrls(
     "constantcontact.com",
     "campaign-archive.com",
     "marginalrevolution.com",
+    "beehiiv.com",
+    "wordpress.com",
+    "wp.com",
+    "safelinks.protection.outlook.com",
+    "links.morningbrew.com",
+    "link.mail.beehiiv.com",
+    "email.mg.substack.com",
+    "click.convertkit-mail.com",
+    "click.convertkit-mail2.com",
+    "trk.klclick.com",
+    "links.tldrnewsletter.com",
+    "tracking.tldrnewsletter.com",
   ];
 
   function isAllowedRedirectUrl(url: string): boolean {

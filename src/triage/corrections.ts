@@ -139,6 +139,14 @@ REASONING: [the user's explanation, cleaned up into a reusable rule]`,
       if (correctionText) {
         // Get original classification from processed_emails table
         const processed = await this.store.getProcessedEmail(email.id);
+
+        // Skip newsletter emails — they are processed via the Readwise pipeline
+        // and should not be reclassified through the correction flow
+        if (processed?.isNewsletter) {
+          console.log(`  [corrections] Skipping newsletter email: "${email.subject}"`);
+          continue;
+        }
+
         const originalClassification = processed?.classification || "unknown";
 
         console.log(`  [corrections] Found correction: "${correctionText}" for "${email.subject}"`);

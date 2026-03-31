@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import type { JMAPClient, Email } from "../jmap/index.js";
 import type { Store, ProcessedEmail } from "../db/index.js";
 import type { ProfileManager } from "../sender/index.js";
@@ -10,6 +11,10 @@ import {
 import { LabelManager } from "./labels.js";
 import { buildConfigFromStore } from "./rules.js";
 import { CorrectionProcessor } from "./corrections.js";
+import { ProfileLoader, extractAndClassifyItems } from "../newsletter/index.js";
+import { ReadwiseClient } from "../readwise/index.js";
+import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
+import { pollReadingProgress } from "../newsletter/feedback.js";
 
 export interface TriageEngineConfig {
   // Phase 1: Label only (default)
@@ -18,6 +23,10 @@ export interface TriageEngineConfig {
   anthropicApiKey: string;
   pollIntervalSeconds: number;
   userEmail: string;
+  readwiseToken?: string;
+  readerProfilePath?: string;
+  readwiseForwardEmail?: string; // For forwarding essay newsletters to Readwise
+  newsletterConfidenceGate?: number; // default 0.7
 }
 
 export interface TriageResult {
@@ -33,8 +42,14 @@ export class TriageEngine {
   private readonly classifier: EmailClassifier;
   private readonly labelManager: LabelManager;
   private readonly correctionProcessor: CorrectionProcessor;
+  private readonly anthropicClient: Anthropic;
+  private readonly readwise: ReadwiseClient | null;
+  private readonly profileLoader: ProfileLoader | null;
+  private readonly readwiseForwardEmail: string | null;
+  private readonly newsletterConfidenceGate: number;
   private running = false;
   private pollTimeout: NodeJS.Timeout | null = null;
+  private pollCount = 0;
   private inboxId: string | null = null;
   private archiveId: string | null = null;
 
@@ -52,6 +67,11 @@ export class TriageEngine {
       this.labelManager,
       config.anthropicApiKey
     );
+    this.anthropicClient = new Anthropic({ apiKey: config.anthropicApiKey });
+    this.readwise = config.readwiseToken ? new ReadwiseClient(config.readwiseToken) : null;
+    this.profileLoader = config.readerProfilePath ? new ProfileLoader(config.readerProfilePath) : null;
+    this.readwiseForwardEmail = config.readwiseForwardEmail ?? null;
+    this.newsletterConfidenceGate = config.newsletterConfidenceGate ?? 0.7;
   }
 
   async initialize(): Promise<void> {
@@ -115,6 +135,31 @@ export class TriageEngine {
       const correctionsProcessed = await this.correctionProcessor.processAllCorrections();
       if (correctionsProcessed > 0) {
         console.log(`Applied ${correctionsProcessed} user corrections`);
+      }
+
+      // Retry any failed Readwise saves
+      if (this.readwise) {
+        try {
+          const retryResult = await retryFailedSaves(this.readwise, this.store);
+          if (retryResult.saved > 0 || retryResult.abandoned > 0) {
+            console.log(`Readwise retry: ${retryResult.saved} saved, ${retryResult.failed} still failing, ${retryResult.abandoned} abandoned`);
+          }
+        } catch (error) {
+          console.error("Readwise retry error:", error);
+        }
+      }
+
+      // Poll Readwise reading progress every ~10 poll cycles (~10 minutes)
+      this.pollCount++;
+      if (this.config.readwiseToken && this.pollCount % 10 === 0) {
+        try {
+          const progressResult = await pollReadingProgress(this.store, this.config.readwiseToken);
+          if (progressResult.signals > 0) {
+            console.log(`Reading progress: checked ${progressResult.checked}, ${progressResult.signals} new signals`);
+          }
+        } catch (error) {
+          console.error("Reading progress poll error:", error);
+        }
       }
 
       // Then process new emails
@@ -215,6 +260,21 @@ export class TriageEngine {
       config
     );
 
+    // Newsletter pipeline: extract items, save to Readwise, archive
+    if (
+      classification.isNewsletter &&
+      classification.newsletterConfidence >= this.newsletterConfidenceGate &&
+      this.readwise &&
+      this.profileLoader
+    ) {
+      try {
+        return await this.processNewsletterEmail(email, classification, config);
+      } catch (error) {
+        console.error(`Newsletter processing failed for ${email.id}, falling back to operational:`, error);
+        // Fall through to regular processing
+      }
+    }
+
     // Apply labels
     const labelsApplied: string[] = [classification.classification];
     await this.labelManager.applyClassificationLabel(
@@ -285,6 +345,124 @@ export class TriageEngine {
     };
   }
 
+  private async processNewsletterEmail(
+    email: Email,
+    classification: { classification: Classification; confidence: number; reasoning: string; contentSummary: string; suggestedLabels: string[]; contentFormat: ContentFormat; isNewsletter: boolean; newsletterConfidence: number },
+    config: ClassifierConfig
+  ): Promise<TriageResult> {
+    const fromEmail = email.from?.[0]?.email || "unknown";
+
+    // Eagerly fetch full email body for newsletter extraction
+    const emailBody = await this.jmap.getEmailBody(email.id);
+
+    // Load reader profile
+    const profile = await this.profileLoader!.load();
+
+    // Get recent tier corrections for few-shot learning
+    const corrections = await this.store.getRecentTierCorrections(20);
+
+    // Extract and classify items
+    const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
+
+    // Check if this is an essay newsletter (no extracted links = essay format)
+    const isEssay = items.length === 0 || (items.length === 1 && classification.contentFormat === "article");
+
+    // For essay newsletters with a Readwise forward address: forward the email instead of URL saving.
+    // This preserves full paid content (Substack etc.) that would be paywalled via URL.
+    if (isEssay && this.readwiseForwardEmail && items.length <= 1) {
+      const essayTier = items.length === 1 ? items[0].tier : "nice-to-have";
+      const essayTopic = items.length === 1 ? items[0].topic : "general";
+      const essayConfidence = items.length === 1 ? items[0].confidence : 0.5;
+      const essayReason = items.length === 1 ? items[0].reason : "Essay newsletter forwarded to Readwise";
+
+      if (essayTier !== "skip") {
+        // Forward the email to Readwise inbox
+        try {
+          const draftId = await this.jmap.createDraft({
+            to: [{ email: this.readwiseForwardEmail }],
+            subject: email.subject || "(no subject)",
+            textBody: getEmailBodyText(emailBody),
+            htmlBody: getEmailBodyHtml(emailBody) || undefined,
+          });
+          await this.jmap.sendEmail(draftId);
+          console.log(`  [newsletter:essay] Forwarded to Readwise: ${email.subject?.slice(0, 50)}`);
+        } catch (error) {
+          console.error(`Failed to forward essay to Readwise:`, error);
+        }
+      }
+
+      // Store as newsletter item in DB (for stats and correction UI)
+      await this.store.saveNewsletterItem({
+        emailId: email.id,
+        url: `forwarded:${email.id}`,
+        title: email.subject || "(no subject)",
+        description: classification.contentSummary || "",
+        tier: essayTier as any,
+        topicTag: essayTopic,
+        confidence: essayConfidence,
+        reason: essayReason,
+        readwiseStatus: essayTier !== "skip" ? "saved" : null,
+        readwiseDocId: null, // Forwarded emails don't have a doc ID
+        retryCount: 0,
+        nextRetryAfter: null,
+      });
+
+      console.log(`  [newsletter:essay] ${email.subject?.slice(0, 50)} → ${essayTier}`);
+    } else {
+      // Link-based newsletter: save individual links to Readwise
+      const saveResult = await saveItemsToReadwise(
+        items,
+        email.id,
+        email.from?.[0]?.name || fromEmail,
+        this.readwise!,
+        this.store
+      );
+
+      console.log(`  [newsletter] ${email.subject?.slice(0, 50)} → ${items.length} items (${saveResult.saved} saved, ${saveResult.skipped} skipped)`);
+    }
+
+    // Delete the newsletter (trash it — user can recover from trash if needed)
+    try {
+      const trash = await this.jmap.findMailboxByRole("trash");
+      if (trash) {
+        await this.jmap.moveEmail(email.id, trash.id);
+      }
+    } catch (error) {
+      console.error(`Failed to trash newsletter ${email.id}:`, error);
+    }
+
+    // Save to processed_emails with is_newsletter = true
+    const pendingDigest = await this.store.getPendingDigest();
+    const processed: ProcessedEmail = {
+      id: email.id,
+      threadId: email.threadId,
+      fromEmail,
+      fromName: email.from?.[0]?.name || null,
+      subject: email.subject,
+      receivedAt: email.receivedAt,
+      processedAt: new Date().toISOString(),
+      classification: classification.classification,
+      confidence: classification.confidence,
+      reasoning: classification.reasoning,
+      contentSummary: classification.contentSummary,
+      labelsApplied: classification.suggestedLabels.join(","),
+      actionTaken: "deleted",
+      contentFormat: classification.contentFormat,
+      digestId: pendingDigest.id,
+      isNewsletter: true,
+    };
+    await this.store.saveProcessedEmail(processed);
+
+    return {
+      emailId: email.id,
+      classification: classification.classification,
+      confidence: classification.confidence,
+      reasoning: classification.reasoning,
+      labelsApplied: classification.suggestedLabels,
+      actionTaken: "archived",
+    };
+  }
+
   private async markAsProcessed(
     email: Email,
     classification: Classification,
@@ -314,6 +492,7 @@ export class TriageEngine {
       actionTaken,
       contentFormat,
       digestId: pendingDigest.id,
+      isNewsletter: false,
     };
 
     await this.store.saveProcessedEmail(processed);
@@ -337,4 +516,39 @@ export class TriageEngine {
   }> {
     return this.store.getEmailStats();
   }
+}
+
+// Helper functions for email body extraction (used by processNewsletterEmail for forwarding)
+function getEmailBodyText(email: Email): string {
+  if (!email.bodyValues) return email.preview || "";
+  if (email.textBody) {
+    for (const part of email.textBody) {
+      if (part.partId && email.bodyValues[part.partId]) {
+        return email.bodyValues[part.partId].value;
+      }
+    }
+  }
+  if (email.htmlBody) {
+    for (const part of email.htmlBody) {
+      if (part.partId && email.bodyValues[part.partId]) {
+        return email.bodyValues[part.partId].value
+          .replace(/<[^>]+>/g, " ")
+          .replace(/&nbsp;/g, " ")
+          .replace(/&amp;/g, "&")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+    }
+  }
+  return email.preview || "";
+}
+
+function getEmailBodyHtml(email: Email): string | null {
+  if (!email.bodyValues || !email.htmlBody) return null;
+  for (const part of email.htmlBody) {
+    if (part.partId && email.bodyValues[part.partId]) {
+      return email.bodyValues[part.partId].value;
+    }
+  }
+  return null;
 }
