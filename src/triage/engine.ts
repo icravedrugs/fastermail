@@ -260,10 +260,18 @@ export class TriageEngine {
       config
     );
 
-    // Newsletter pipeline: extract items, save to Readwise, archive
+    // Newsletter pipeline: extract items, save to Readwise, trash
+    // Two detection paths:
+    // 1. LLM explicitly flagged it as newsletter with high confidence
+    // 2. Content format is article/link_collection AND classification is low-priority/fyi
+    //    (catches newsletters from custom domains like stratechery.com that the LLM misses)
+    const isLikelyNewsletter =
+      (classification.isNewsletter && classification.newsletterConfidence >= this.newsletterConfidenceGate) ||
+      ((classification.contentFormat === "article" || classification.contentFormat === "link_collection") &&
+       (classification.classification === "low-priority" || classification.classification === "fyi"));
+
     if (
-      classification.isNewsletter &&
-      classification.newsletterConfidence >= this.newsletterConfidenceGate &&
+      isLikelyNewsletter &&
       this.readwise &&
       this.profileLoader
     ) {
