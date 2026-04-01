@@ -3,12 +3,25 @@ import type { ReadwiseClient } from "../readwise/index.js";
 
 const READWISE_BASE_URL = "https://readwise.io/api/v3";
 
+/**
+ * Extract the tier from a list of Readwise tags (e.g., ["tier:must-read", "src:foo"])
+ */
+function extractTierFromTags(tags: string[]): string | null {
+  for (const tag of tags) {
+    if (tag.startsWith("tier:")) {
+      return tag.slice(5); // "tier:must-read" -> "must-read"
+    }
+  }
+  return null;
+}
+
 export async function processWebhookEvent(
   event: {
     type: string;
     document_id?: string;
     reading_progress?: number;
     highlight_text?: string;
+    tags?: string[];
     timestamp?: string;
   },
   store: Store
@@ -23,32 +36,74 @@ export async function processWebhookEvent(
     return { processed: false, reason: "not a fastermail item" };
   }
 
-  let signalType: "document_finished" | "highlight_created" | "document_archived";
+  const now = event.timestamp ?? new Date().toISOString();
 
   switch (event.type) {
     case "reader.document.finished":
-      signalType = "document_finished";
-      break;
+      await store.saveReadingFeedback({
+        itemId: item.id,
+        readwiseDocId: docId,
+        signalType: "document_finished",
+        readingProgress: event.reading_progress ?? null,
+        highlightedText: null,
+        eventTimestamp: now,
+      });
+      return { processed: true, reason: "recorded finish" };
+
     case "readwise.highlight.created":
-      signalType = "highlight_created";
-      break;
-    case "reader.document.archived":
-      signalType = "document_archived";
-      break;
+      await store.saveReadingFeedback({
+        itemId: item.id,
+        readwiseDocId: docId,
+        signalType: "highlight_created",
+        readingProgress: null,
+        highlightedText: event.highlight_text ?? null,
+        eventTimestamp: now,
+      });
+      return { processed: true, reason: "recorded highlight" };
+
+    case "reader.document.tags_updated": {
+      // Detect tier change from Readwise tag edits
+      if (!event.tags) {
+        return { processed: false, reason: "no tags in event" };
+      }
+      const newTier = extractTierFromTags(event.tags);
+      if (!newTier || newTier === item.tier) {
+        return { processed: false, reason: "no tier change detected" };
+      }
+      // Valid tier values
+      if (newTier !== "must-read" && newTier !== "nice-to-have" && newTier !== "skip") {
+        return { processed: false, reason: `unknown tier: ${newTier}` };
+      }
+      // Save as a tier correction (same as the web UI)
+      await store.saveTierCorrection({
+        itemId: item.id,
+        originalTier: item.tier,
+        correctedTier: newTier as any,
+      });
+      await store.updateNewsletterItemTier(item.id, newTier as any);
+      console.log(`[webhook] Tier correction from Readwise: "${item.title?.slice(0, 40)}" ${item.tier} → ${newTier}`);
+      return { processed: true, reason: `tier corrected to ${newTier}` };
+    }
+
+    case "reader.document.deleted": {
+      // User deleted from Readwise = demotion to skip
+      if (item.tier === "skip") {
+        return { processed: false, reason: "already skip" };
+      }
+      await store.saveTierCorrection({
+        itemId: item.id,
+        originalTier: item.tier,
+        correctedTier: "skip",
+      });
+      await store.updateNewsletterItemTier(item.id, "skip");
+      await store.updateNewsletterItemReadwise(item.id, "pending", null, 0, null);
+      console.log(`[webhook] Deleted from Readwise: "${item.title?.slice(0, 40)}" → skip`);
+      return { processed: true, reason: "demoted to skip (deleted in Readwise)" };
+    }
+
     default:
-      return { processed: false, reason: "unhandled event type" };
+      return { processed: false, reason: `unhandled event type: ${event.type}` };
   }
-
-  await store.saveReadingFeedback({
-    itemId: item.id,
-    readwiseDocId: docId,
-    signalType,
-    readingProgress: event.reading_progress ?? null,
-    highlightedText: signalType === "highlight_created" ? (event.highlight_text ?? null) : null,
-    eventTimestamp: event.timestamp ?? new Date().toISOString(),
-  });
-
-  return { processed: true, reason: "recorded" };
 }
 
 export async function computeExplorationRate(
@@ -58,7 +113,7 @@ export async function computeExplorationRate(
   const summary = await store.getFeedbackSummary(30);
 
   const totalWithFeedback =
-    summary.totalHighlights + summary.totalFinished + summary.totalArchived;
+    summary.totalHighlights + summary.totalFinished;
 
   if (totalWithFeedback < 10) {
     return baseRate;
@@ -175,14 +230,14 @@ export async function pollReadingProgress(
       signals++;
     }
 
-    // If never opened after 14 days, record that as a signal too
+    // If never opened after 14 days, record as a weak negative signal
     const daysSinceSaved =
       (Date.now() - new Date(item.createdAt).getTime()) / (1000 * 60 * 60 * 24);
     if (doc.first_opened_at === null && daysSinceSaved >= 14) {
       await store.saveReadingFeedback({
         itemId: item.id,
         readwiseDocId: item.readwiseDocId,
-        signalType: "document_archived", // closest signal for "never opened"
+        signalType: "progress_update",
         readingProgress: 0,
         highlightedText: null,
         eventTimestamp: new Date().toISOString(),

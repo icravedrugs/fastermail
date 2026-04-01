@@ -107,7 +107,7 @@ export interface CorrectionToken {
   expiresAt: string;
 }
 
-export type FeedbackSignal = 'highlight_created' | 'document_finished' | 'document_archived' | 'progress_update';
+export type FeedbackSignal = 'highlight_created' | 'document_finished' | 'progress_update';
 
 export interface ReadingFeedback {
   id: number;
@@ -885,7 +885,6 @@ export class Store {
   async getFeedbackSummary(sinceDays: number = 30): Promise<{
     totalHighlights: number;
     totalFinished: number;
-    totalArchived: number;
     highlightsByTier: Record<string, number>;
     highlightsByTopic: Record<string, number>;
     unreadMustReads: number;
@@ -906,12 +905,6 @@ export class Store {
     const finished = await this.db.execute({
       sql: `SELECT COUNT(*) as count FROM reading_feedback
             WHERE signal_type = 'document_finished' AND event_timestamp >= ?`,
-      args: [since],
-    });
-
-    const archived = await this.db.execute({
-      sql: `SELECT COUNT(*) as count FROM reading_feedback
-            WHERE signal_type = 'document_archived' AND event_timestamp >= ?`,
       args: [since],
     });
 
@@ -954,7 +947,6 @@ export class Store {
     return {
       totalHighlights,
       totalFinished: finished.rows[0].count as number,
-      totalArchived: archived.rows[0].count as number,
       highlightsByTier,
       highlightsByTopic,
       unreadMustReads: unreadMustReads.rows[0].count as number,
