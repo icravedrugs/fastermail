@@ -375,10 +375,15 @@ async function main(): Promise<void> {
         }
       }
 
-      // Update item for response
-      const updatedItem = { ...item, tier: newTier as any };
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(renderCorrectionSuccess(updatedItem, newTier, token, baseUrl || `http://localhost:${port}`));
+      // Return JSON for inline fetch, HTML for direct navigation
+      if (url.searchParams.get("json") === "1") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, item: item.id, tier: newTier }));
+      } else {
+        const updatedItem = { ...item, tier: newTier as any };
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(renderCorrectionSuccess(updatedItem, newTier, token, baseUrl || `http://localhost:${port}`));
+      }
 
     } else if (url.pathname === "/webhooks/readwise" && req.method === "POST") {
       // Readwise webhook endpoint — receives reading events

@@ -45,25 +45,29 @@ function renderTierButton(
   const bg = isActive ? color : "#fff";
   const fg = isActive ? "#fff" : color;
   const border = color;
-  const url = `${baseUrl}/corrections/update?token=${encodeURIComponent(token)}&item=${item.id}&tier=${tier}`;
 
-  return `<a href="${escapeHtml(url)}" style="
-    display: inline-block;
-    padding: 4px 12px;
-    margin: 0 4px;
-    border: 2px solid ${border};
-    border-radius: 4px;
-    background: ${bg};
-    color: ${fg};
-    text-decoration: none;
-    font-size: 13px;
-    font-weight: ${isActive ? "bold" : "normal"};
-  ">${tierLabel(tier)}</a>`;
+  return `<button
+    data-item="${item.id}" data-tier="${tier}"
+    onclick="setTier(this, ${item.id}, '${tier}', '${escapeHtml(token)}', '${escapeHtml(baseUrl)}')"
+    ${isActive ? 'disabled' : ''}
+    style="
+      padding: 4px 12px;
+      margin: 0 4px;
+      border: 2px solid ${border};
+      border-radius: 4px;
+      background: ${bg};
+      color: ${fg};
+      cursor: ${isActive ? "default" : "pointer"};
+      font-size: 13px;
+      font-weight: ${isActive ? "bold" : "normal"};
+      opacity: ${isActive ? "1" : "0.85"};
+      transition: opacity 0.15s;
+    ">${tierLabel(tier)}</button>`;
 }
 
 function renderItem(item: NewsletterItem, token: string, baseUrl: string): string {
   const title = item.title || item.url;
-  const titleHtml = item.url
+  const titleHtml = item.url && !item.url.startsWith("forwarded:")
     ? `<a href="${escapeHtml(item.url)}" style="color: #1a1a1a; text-decoration: underline;" target="_blank">${escapeHtml(title)}</a>`
     : escapeHtml(title);
 
@@ -75,19 +79,20 @@ function renderItem(item: NewsletterItem, token: string, baseUrl: string): strin
     ? `<span style="display: inline-block; background: #f0f0f0; padding: 2px 8px; border-radius: 3px; font-size: 12px; color: #666; margin-right: 8px;">${escapeHtml(item.topicTag)}</span>`
     : "";
 
-  const confidenceHtml = `<span style="font-size: 12px; color: #999;">${Math.round(item.confidence * 100)}% confidence</span>`;
+  const confidenceHtml = `<span style="font-size: 12px; color: #999;">${Math.round(item.confidence * 100)}%</span>`;
 
   return `
-    <div style="padding: 12px 0; border-bottom: 1px solid #eee;">
+    <div id="item-${item.id}" style="padding: 12px 0; border-bottom: 1px solid #eee;">
       <div style="font-size: 15px; font-weight: 500;">${titleHtml}</div>
       ${descriptionHtml}
       <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px;">
-        <div>
+        <div id="buttons-${item.id}">
           ${renderTierButton(item, "must-read", token, baseUrl)}
           ${renderTierButton(item, "nice-to-have", token, baseUrl)}
           ${renderTierButton(item, "skip", token, baseUrl)}
         </div>
         <div>${topicHtml}${confidenceHtml}</div>
+        <span id="status-${item.id}" style="font-size: 12px; color: #999;"></span>
       </div>
     </div>`;
 }
@@ -120,6 +125,12 @@ export function renderCorrectionsPage(
     itemsHtml = `<p style="color: #999; text-align: center; padding: 40px 0;">No newsletter items to review.</p>`;
   }
 
+  const tierColors = JSON.stringify({
+    "must-read": "#22c55e",
+    "nice-to-have": "#3b82f6",
+    "skip": "#9ca3af",
+  });
+
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -129,8 +140,56 @@ export function renderCorrectionsPage(
 </head>
 <body style="font-family: sans-serif; max-width: 700px; margin: 30px auto; padding: 0 16px; color: #1a1a1a;">
   <h1 style="font-size: 22px; margin-bottom: 4px;">Newsletter Item Review</h1>
-  <p style="color: #666; font-size: 14px; margin-top: 0;">Click a tier button to reclassify an item. Your corrections help improve future triage.</p>
+  <p style="color: #666; font-size: 14px; margin-top: 0;">Click a tier button to reclassify. Changes save instantly.</p>
   ${itemsHtml}
+  <script>
+    var TIER_COLORS = ${tierColors};
+
+    function setTier(btn, itemId, tier, token, baseUrl) {
+      var buttons = document.querySelectorAll('#buttons-' + itemId + ' button');
+      var status = document.getElementById('status-' + itemId);
+
+      // Disable all buttons, show saving
+      buttons.forEach(function(b) { b.disabled = true; b.style.opacity = '0.5'; });
+      status.textContent = 'saving...';
+      status.style.color = '#999';
+
+      var url = baseUrl + '/corrections/update?token=' + encodeURIComponent(token)
+        + '&item=' + itemId + '&tier=' + tier + '&json=1';
+
+      fetch(url)
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+          if (data.ok) {
+            // Update button styles to reflect new tier
+            buttons.forEach(function(b) {
+              var bTier = b.getAttribute('data-tier');
+              var color = TIER_COLORS[bTier] || '#666';
+              var isActive = bTier === tier;
+              b.style.background = isActive ? color : '#fff';
+              b.style.color = isActive ? '#fff' : color;
+              b.style.borderColor = color;
+              b.style.fontWeight = isActive ? 'bold' : 'normal';
+              b.style.cursor = isActive ? 'default' : 'pointer';
+              b.style.opacity = isActive ? '1' : '0.85';
+              b.disabled = isActive;
+            });
+            status.textContent = 'saved';
+            status.style.color = '#22c55e';
+            setTimeout(function() { status.textContent = ''; }, 1500);
+          } else {
+            status.textContent = 'error';
+            status.style.color = '#ef4444';
+            buttons.forEach(function(b) { b.disabled = false; b.style.opacity = '1'; });
+          }
+        })
+        .catch(function() {
+          status.textContent = 'error';
+          status.style.color = '#ef4444';
+          buttons.forEach(function(b) { b.disabled = false; b.style.opacity = '1'; });
+        });
+    }
+  </script>
 </body>
 </html>`;
 }
