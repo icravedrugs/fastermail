@@ -52,10 +52,16 @@ const SKIP_TEXTS = [
   "sent by",
 ];
 
-// Extract href value from an anchor tag
+// Extract href value from an anchor tag, decoding HTML entities
 function extractHref(anchorTag: string): string | null {
   const match = anchorTag.match(/href\s*=\s*["']([^"']+)["']/i);
-  return match ? match[1] : null;
+  if (!match) return null;
+  return match[1]
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }
 
 // Extract link text from an anchor tag (text between <a> and </a>)

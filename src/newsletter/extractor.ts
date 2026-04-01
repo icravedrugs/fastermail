@@ -347,6 +347,7 @@ If no curated content links are found, respond with: []`,
       reason: string;
     }>;
 
+    const seen = new Set<string>();
     return parsed
       .filter((item) => item.index >= 1 && item.index <= links.length)
       .map((item) => {
@@ -361,6 +362,11 @@ If no curated content links are found, respond with: []`,
           reason: item.reason || "",
           softSkip,
         };
+      })
+      .filter((item) => {
+        if (seen.has(item.url)) return false;
+        seen.add(item.url);
+        return true;
       });
   } catch (error) {
     console.error("Failed to parse LLM newsletter extraction response:", error);
