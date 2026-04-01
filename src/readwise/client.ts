@@ -69,8 +69,16 @@ export class ReadwiseClient {
   }
 
   async delete(documentId: string): Promise<void> {
-    await this.fetch<void>(`${BASE_URL}/delete/${documentId}/`, {
-      method: "DELETE",
-    });
+    try {
+      await this.fetch<void>(`${BASE_URL}/delete/${documentId}/`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      // 404 = already deleted or never existed — not an error
+      if (error instanceof Error && error.message.includes("404")) {
+        return;
+      }
+      throw error;
+    }
   }
 }

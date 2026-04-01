@@ -30,6 +30,33 @@ export class DigestScheduler {
     console.log(
       `Digest scheduler started (times: ${this.config.digestTimes.join(", ")})`
     );
+
+    // Check if we missed a digest (e.g., server restarted after a scheduled time)
+    this.catchUpIfNeeded();
+  }
+
+  private async catchUpIfNeeded(): Promise<void> {
+    try {
+      const lastDigest = await this.store.getLastDigest();
+      const lastSentAt = lastDigest?.sentAt ? new Date(lastDigest.sentAt) : null;
+      const now = new Date();
+
+      // Check each scheduled time — if any has passed today and the last digest
+      // was sent before that time, we missed it
+      for (const timeStr of this.config.digestTimes) {
+        const [hours, minutes] = timeStr.split(":").map(Number);
+        const scheduledToday = new Date(now);
+        scheduledToday.setHours(hours, minutes, 0, 0);
+
+        if (scheduledToday <= now && (!lastSentAt || lastSentAt < scheduledToday)) {
+          console.log(`[DIGEST] Missed ${timeStr} digest (last sent: ${lastSentAt?.toISOString() || "never"}). Running catch-up...`);
+          await this.runDigest();
+          return; // Only catch up once
+        }
+      }
+    } catch (error) {
+      console.error("Digest catch-up check failed:", error);
+    }
   }
 
   stop(): void {
