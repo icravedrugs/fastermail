@@ -68,7 +68,7 @@ function renderTierButton(
 function renderItem(item: NewsletterItem, token: string, baseUrl: string): string {
   const title = item.title || item.url;
   const titleHtml = item.url && !item.url.startsWith("forwarded:")
-    ? `<a href="${escapeHtml(item.url)}" style="color: #1a1a1a; text-decoration: underline;" target="_blank">${escapeHtml(title)}</a>`
+    ? `<a href="${escapeHtml(item.url)}" style="color: #2563eb; text-decoration: none;" target="_blank">${escapeHtml(title)}</a>`
     : escapeHtml(title);
 
   const descriptionHtml = item.description

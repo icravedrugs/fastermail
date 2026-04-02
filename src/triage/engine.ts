@@ -11,7 +11,7 @@ import {
 import { LabelManager } from "./labels.js";
 import { buildConfigFromStore } from "./rules.js";
 import { CorrectionProcessor } from "./corrections.js";
-import { ProfileLoader, extractAndClassifyItems } from "../newsletter/index.js";
+import { ProfileLoader, extractAndClassifyItems, extractViewInBrowserUrl } from "../newsletter/index.js";
 import { ReadwiseClient } from "../readwise/index.js";
 import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
 import { pollReadingProgress } from "../newsletter/feedback.js";
@@ -382,10 +382,14 @@ export class TriageEngine {
       const essayConfidence = items.length >= 1 ? items[0].confidence : 0.5;
       const essayReason = items.length >= 1 ? items[0].reason : "Essay newsletter";
 
+      // Try to find a "view in browser" link for the corrections UI
+      const html = getEmailBodyHtml(emailBody);
+      const viewUrl = html ? extractViewInBrowserUrl(html) : null;
+
       // Store as single item in DB (for stats and correction UI)
       await this.store.saveNewsletterItem({
         emailId: email.id,
-        url: `forwarded:${email.id}`,
+        url: viewUrl || `forwarded:${email.id}`,
         title: email.subject || "(no subject)",
         description: classification.contentSummary || "",
         tier: essayTier as any,

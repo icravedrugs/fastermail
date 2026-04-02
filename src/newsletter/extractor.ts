@@ -65,7 +65,7 @@ function getEmailBodyText(email: Email): string {
  * Try to extract a "view in browser" URL from newsletter HTML.
  * Many newsletters include this as a fallback link.
  */
-function extractViewInBrowserUrl(html: string): string | null {
+export function extractViewInBrowserUrl(html: string): string | null {
   const patterns = [
     /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?view\s+(?:in\s+)?(?:browser|online|web)/i,
     /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?read\s+(?:in\s+)?(?:browser|online|web)/i,
