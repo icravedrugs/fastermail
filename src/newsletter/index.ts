@@ -2,6 +2,7 @@ export { ProfileLoader, type ReaderProfile } from "./profile.js";
 export {
   extractAndClassifyItems,
   extractViewInBrowserUrl,
+  resolveRedirectUrl,
   type ExtractedNewsletterItem,
 } from "./extractor.js";
 export {

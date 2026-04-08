@@ -14,6 +14,7 @@ export interface ExtractedNewsletterItem {
   reason: string;
   softSkip: boolean; // true = off-profile but not objectionable, eligible for exploration
   readerWorthy: boolean; // false = not article-like content, should stay as email
+  author: string | null; // extracted author name from the content body
 }
 
 /**
@@ -81,6 +82,48 @@ export function extractViewInBrowserUrl(html: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Resolve a single redirect/tracking URL to its final destination.
+ * Follows redirects safely (SSRF-protected) and returns the resolved URL,
+ * or the original URL if resolution fails.
+ */
+export async function resolveRedirectUrl(url: string): Promise<string> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(url, {
+      method: "HEAD",
+      redirect: "manual",
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    const location = response.headers.get("location");
+    if (location && location.startsWith("https://")) {
+      // Follow one more hop if needed
+      try {
+        const controller2 = new AbortController();
+        const timeout2 = setTimeout(() => controller2.abort(), 5000);
+        const response2 = await fetch(location, {
+          method: "HEAD",
+          redirect: "manual",
+          signal: controller2.signal,
+        });
+        clearTimeout(timeout2);
+        const location2 = response2.headers.get("location");
+        if (location2 && location2.startsWith("https://")) {
+          return location2;
+        }
+      } catch {
+        // One hop was enough
+      }
+      return location;
+    }
+  } catch {
+    // Keep original URL on failure
+  }
+  return url;
 }
 
 /**
@@ -365,6 +408,7 @@ If no curated content links are found, respond with: []`,
           reason: item.reason || "",
           softSkip,
           readerWorthy: true, // links that survive filtering are reader-worthy by definition
+          author: null,
         };
       })
       .filter((item) => {
@@ -419,8 +463,10 @@ If reader-worthy, classify relevance to the reader:
 - "skip-soft": Not directly relevant but could be interesting or surprising
 - "skip-hard": Actively irrelevant, matches low-value topics
 
+Also extract the AUTHOR — the person who actually wrote this content. Look for bylines, signatures, or "by [name]" patterns in the text. This is often different from the newsletter brand name (e.g., "Tyler Cowen" not "Marginal Revolution", "Molly Webster" not "Radiolab"). If multiple authors, list them comma-separated. If you can't identify a specific person, return null.
+
 Respond with ONLY a JSON object:
-{"title": "Clean title", "description": "One sentence summary", "readerWorthy": true, "tier": "must-read", "topic": "topic-tag", "confidence": 0.9, "reason": "Why this tier"}
+{"title": "Clean title", "description": "One sentence summary", "author": "Author Name", "readerWorthy": true, "tier": "must-read", "topic": "topic-tag", "confidence": 0.9, "reason": "Why this tier"}
 
 If NOT reader-worthy, set readerWorthy to false and tier to "skip-hard".`,
       },
@@ -437,6 +483,7 @@ If NOT reader-worthy, set readerWorthy to false and tier to "skip-hard".`,
     const parsed = JSON.parse(jsonMatch[0]) as {
       title: string;
       description: string;
+      author?: string | null;
       readerWorthy?: boolean;
       tier: string;
       topic: string;
@@ -448,7 +495,7 @@ If NOT reader-worthy, set readerWorthy to false and tier to "skip-hard".`,
     const { tier, softSkip } = parseTier(parsed.tier);
     return [
       {
-        url: "", // Essay newsletters are forwarded, not saved by URL
+        url: "", // Essay newsletters are saved via API, not by URL
         title: parsed.title || subject,
         description: parsed.description || "",
         tier: readerWorthy ? tier : "skip",
@@ -457,6 +504,7 @@ If NOT reader-worthy, set readerWorthy to false and tier to "skip-hard".`,
         reason: parsed.reason || "",
         softSkip,
         readerWorthy,
+        author: parsed.author || null,
       },
     ];
   } catch (error) {

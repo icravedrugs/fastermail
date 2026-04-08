@@ -1,8 +1,11 @@
 export interface SaveDocumentParams {
   url: string;
+  html?: string;
+  should_clean_html?: boolean;
   title?: string;
   author?: string;
   summary?: string;
+  published_date?: string;
   tags?: string[];
   notes?: string;
   location?: "new" | "later" | "archive" | "feed";

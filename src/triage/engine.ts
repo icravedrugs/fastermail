@@ -11,10 +11,17 @@ import {
 import { LabelManager } from "./labels.js";
 import { buildConfigFromStore } from "./rules.js";
 import { CorrectionProcessor } from "./corrections.js";
-import { ProfileLoader, extractAndClassifyItems, extractViewInBrowserUrl } from "../newsletter/index.js";
+import { ProfileLoader, extractAndClassifyItems, extractViewInBrowserUrl, resolveRedirectUrl } from "../newsletter/index.js";
 import { ReadwiseClient } from "../readwise/index.js";
 import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
 import { pollReadingProgress } from "../newsletter/feedback.js";
+
+function slugify(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 /**
  * Senders whose emails look like link roundups but should stay in the inbox
@@ -404,38 +411,70 @@ export class TriageEngine {
         return null;
       }
 
-      // Try to find a "view in browser" link for the corrections UI
+      // Build the best URL: resolve "view in browser" link, fall back to sender domain
       const html = getEmailBodyHtml(emailBody);
-      const viewUrl = html ? extractViewInBrowserUrl(html) : null;
+      const rawViewUrl = html ? extractViewInBrowserUrl(html) : null;
+      let essayUrl: string;
+      if (rawViewUrl) {
+        essayUrl = await resolveRedirectUrl(rawViewUrl);
+      } else {
+        // Use sender domain so Readwise shows a meaningful origin
+        const senderDomain = fromEmail.split("@")[1] || "newsletter";
+        essayUrl = `https://${senderDomain}/fastermail/${email.id}`;
+      }
+
+      // Build author: LLM-extracted author, with newsletter name as fallback
+      const newsletterName = email.from?.[0]?.name || null;
+      const essayAuthor = items.length >= 1 && items[0].author
+        ? (newsletterName && items[0].author !== newsletterName
+            ? `${items[0].author}, ${newsletterName}`
+            : items[0].author)
+        : newsletterName;
 
       // Store as single item in DB (for stats and correction UI)
-      await this.store.saveNewsletterItem({
+      const itemId = await this.store.saveNewsletterItem({
         emailId: email.id,
-        url: viewUrl || `forwarded:${email.id}`,
+        url: essayUrl,
         title: email.subject || "(no subject)",
         description: classification.contentSummary || "",
         tier: essayTier as any,
         topicTag: essayTopic,
         confidence: essayConfidence,
         reason: essayReason,
-        readwiseStatus: essayTier !== "skip" ? "saved" : null,
+        readwiseStatus: essayTier !== "skip" ? "pending" : null,
         readwiseDocId: null,
         retryCount: 0,
         nextRetryAfter: null,
       });
 
-      if (essayTier !== "skip" && this.readwiseForwardEmail) {
+      // Save to Readwise via API (replaces SMTP forwarding — preserves metadata)
+      if (essayTier !== "skip" && this.readwise) {
+        const tags = [
+          "tier:" + essayTier,
+          "src:" + slugify(newsletterName || fromEmail),
+          "topic:" + essayTopic,
+        ];
         try {
-          const draftId = await this.jmap.createDraft({
-            to: [{ email: this.readwiseForwardEmail }],
-            subject: email.subject || "(no subject)",
-            textBody: getEmailBodyText(emailBody),
-            htmlBody: getEmailBodyHtml(emailBody) || undefined,
+          const response = await this.readwise.save({
+            url: essayUrl,
+            html: html || undefined,
+            should_clean_html: true,
+            title: email.subject || "(no subject)",
+            author: essayAuthor || undefined,
+            summary: classification.contentSummary || undefined,
+            published_date: email.receivedAt?.split("T")[0],
+            category: "email",
+            tags,
+            notes: essayReason,
+            location: essayTier === "must-read" ? "new" : "later",
+            saved_using: "fastermail",
           });
-          await this.jmap.sendEmail(draftId);
-          console.log(`  [newsletter:essay] Forwarded to Readwise: ${email.subject?.slice(0, 50)}`);
+          await this.store.updateNewsletterItemReadwise(itemId, "saved", response.id, 0, null);
+          console.log(`  [newsletter:essay] Saved to Readwise via API: ${email.subject?.slice(0, 50)}`);
         } catch (error) {
-          console.error(`Failed to forward essay to Readwise:`, error);
+          console.error(`Failed to save essay to Readwise:`, error);
+          const nextRetryAfter = new Date(Date.now() + 60_000).toISOString();
+          await this.store.updateNewsletterItemReadwise(itemId, "failed", null, 1, nextRetryAfter);
         }
       }
 
