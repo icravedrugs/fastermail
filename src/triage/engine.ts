@@ -16,6 +16,14 @@ import { ReadwiseClient } from "../readwise/index.js";
 import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
 import { pollReadingProgress } from "../newsletter/feedback.js";
 
+/**
+ * Senders whose emails look like link roundups but should stay in the inbox
+ * as regular emails (not extracted for links or trashed).
+ */
+const NEWSLETTER_BYPASS_SENDERS = [
+  "@moneysavingexpert.com",
+];
+
 export interface TriageEngineConfig {
   // Phase 1: Label only (default)
   // Phase 2: Label and archive
@@ -265,10 +273,14 @@ export class TriageEngine {
     // 1. LLM explicitly flagged it as newsletter with high confidence
     // 2. Content format is article/link_collection AND classification is low-priority/fyi
     //    (catches newsletters from custom domains like stratechery.com that the LLM misses)
+    const isNewsletterBypassed = NEWSLETTER_BYPASS_SENDERS.some((domain) =>
+      fromEmail?.toLowerCase().endsWith(domain)
+    );
     const isLikelyNewsletter =
-      (classification.isNewsletter && classification.newsletterConfidence >= this.newsletterConfidenceGate) ||
-      ((classification.contentFormat === "article" || classification.contentFormat === "link_collection") &&
-       (classification.classification === "low-priority" || classification.classification === "fyi"));
+      !isNewsletterBypassed &&
+      ((classification.isNewsletter && classification.newsletterConfidence >= this.newsletterConfidenceGate) ||
+       ((classification.contentFormat === "article" || classification.contentFormat === "link_collection") &&
+        (classification.classification === "low-priority" || classification.classification === "fyi")));
 
     if (
       isLikelyNewsletter &&
@@ -276,7 +288,9 @@ export class TriageEngine {
       this.profileLoader
     ) {
       try {
-        return await this.processNewsletterEmail(email, classification, config);
+        const result = await this.processNewsletterEmail(email, classification, config);
+        if (result) return result;
+        // null = not reader-worthy, fall through to regular processing
       } catch (error) {
         console.error(`Newsletter processing failed for ${email.id}, falling back to operational:`, error);
         // Fall through to regular processing
@@ -357,7 +371,7 @@ export class TriageEngine {
     email: Email,
     classification: { classification: Classification; confidence: number; reasoning: string; contentSummary: string; suggestedLabels: string[]; contentFormat: ContentFormat; isNewsletter: boolean; newsletterConfidence: number },
     config: ClassifierConfig
-  ): Promise<TriageResult> {
+  ): Promise<TriageResult | null> {
     const fromEmail = email.from?.[0]?.email || "unknown";
 
     // Eagerly fetch full email body for newsletter extraction
@@ -381,6 +395,14 @@ export class TriageEngine {
       const essayTopic = items.length >= 1 ? items[0].topic : "general";
       const essayConfidence = items.length >= 1 ? items[0].confidence : 0.5;
       const essayReason = items.length >= 1 ? items[0].reason : "Essay newsletter";
+      const readerWorthy = items.length >= 1 ? items[0].readerWorthy : true;
+
+      // Not reader-worthy (account updates, fund reports, etc.) — bail out and
+      // let the caller process this as a normal email instead
+      if (!readerWorthy) {
+        console.log(`  [newsletter:not-reader-worthy] ${email.subject?.slice(0, 50)} — processing as regular email`);
+        return null;
+      }
 
       // Try to find a "view in browser" link for the corrections UI
       const html = getEmailBodyHtml(emailBody);

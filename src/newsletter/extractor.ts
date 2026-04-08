@@ -13,6 +13,7 @@ export interface ExtractedNewsletterItem {
   confidence: number;
   reason: string;
   softSkip: boolean; // true = off-profile but not objectionable, eligible for exploration
+  readerWorthy: boolean; // false = not article-like content, should stay as email
 }
 
 /**
@@ -306,7 +307,9 @@ EXCLUDE:
 - Feedback/rating links
 - Self-referential links (link to the newsletter itself)
 
-For each content link, classify its relevance to the reader:
+First, determine if each link points to something worth reading in a reader app (an article, essay, analysis, tutorial, or curated content). Links that point to non-article content — account updates, fund reports, community posts, product changelogs, patch notes, shipping notifications, event invites, surveys — are NOT reader-worthy and should always be "skip-hard" regardless of topic relevance.
+
+For reader-worthy content links, classify relevance to the reader:
 - "must-read": Directly relevant to the reader's current work, focus areas, or core interests. They need to see this.
 - "nice-to-have": Interesting, touches on adjacent interests or curiosities. Worth saving but not urgent.
 - "skip-soft": Not directly relevant right now, but not objectionable. Could be interesting, surprising, or culturally enriching. The reader might enjoy stumbling across it.
@@ -361,6 +364,7 @@ If no curated content links are found, respond with: []`,
           confidence: typeof item.confidence === "number" ? item.confidence : 0.5,
           reason: item.reason || "",
           softSkip,
+          readerWorthy: true, // links that survive filtering are reader-worthy by definition
         };
       })
       .filter((item) => {
@@ -393,7 +397,7 @@ async function classifyEssayNewsletter(
     messages: [
       {
         role: "user",
-        content: `You are classifying a newsletter essay/article for a reader.
+        content: `You are classifying a newsletter email for a reader.
 
 READER PROFILE:
 ${profile.raw}
@@ -405,14 +409,20 @@ NEWSLETTER SUBJECT: ${subject}
 CONTENT (first 3000 chars):
 ${emailText.slice(0, 3000)}
 
-Classify this newsletter's relevance to the reader:
+First, determine if this is READER-WORTHY — meaning it contains article-like content (essays, analysis, opinion pieces, tutorials, long-form writing) that benefits from being read in a reader app.
+
+NOT reader-worthy: account updates, patron/membership updates, fund reports, community posts, product changelogs, event invites/RSVPs/AMAs, shipping notifications, surveys, short status updates, promotional emails, donation appeals, or any email under ~300 words that is primarily a call-to-action rather than substantive writing. These should stay as regular emails.
+
+If reader-worthy, classify relevance to the reader:
 - "must-read": Directly relevant to their work or core interests
 - "nice-to-have": Interesting but not urgent
 - "skip-soft": Not directly relevant but could be interesting or surprising
 - "skip-hard": Actively irrelevant, matches low-value topics
 
 Respond with ONLY a JSON object:
-{"title": "Clean title", "description": "One sentence summary", "tier": "must-read", "topic": "topic-tag", "confidence": 0.9, "reason": "Why this tier"}`,
+{"title": "Clean title", "description": "One sentence summary", "readerWorthy": true, "tier": "must-read", "topic": "topic-tag", "confidence": 0.9, "reason": "Why this tier"}
+
+If NOT reader-worthy, set readerWorthy to false and tier to "skip-hard".`,
       },
     ],
   });
@@ -427,23 +437,26 @@ Respond with ONLY a JSON object:
     const parsed = JSON.parse(jsonMatch[0]) as {
       title: string;
       description: string;
+      readerWorthy?: boolean;
       tier: string;
       topic: string;
       confidence: number;
       reason: string;
     };
 
+    const readerWorthy = parsed.readerWorthy !== false;
     const { tier, softSkip } = parseTier(parsed.tier);
     return [
       {
         url: "", // Essay newsletters are forwarded, not saved by URL
         title: parsed.title || subject,
         description: parsed.description || "",
-        tier,
+        tier: readerWorthy ? tier : "skip",
         topic: parsed.topic || "general",
         confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.5,
         reason: parsed.reason || "",
         softSkip,
+        readerWorthy,
       },
     ];
   } catch (error) {
