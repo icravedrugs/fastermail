@@ -29,6 +29,7 @@ function slugify(name: string): string {
  */
 const NEWSLETTER_BYPASS_SENDERS = [
   "@moneysavingexpert.com",
+  "@luma-mail.com",
 ];
 
 export interface TriageEngineConfig {
