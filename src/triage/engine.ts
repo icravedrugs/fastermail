@@ -30,6 +30,7 @@ function slugify(name: string): string {
 const NEWSLETTER_BYPASS_SENDERS = [
   "@moneysavingexpert.com",
   "@luma-mail.com",
+  "@patreon.com",
 ];
 
 /**
@@ -431,11 +432,20 @@ export class TriageEngine {
     if (isEssay) {
       // Classify the essay's relevance without extracting links
       const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
-      const essayTier = items.length >= 1 ? items[0].tier : "nice-to-have";
-      const essayTopic = items.length >= 1 ? items[0].topic : "general";
-      const essayConfidence = items.length >= 1 ? items[0].confidence : 0.5;
-      const essayReason = items.length >= 1 ? items[0].reason : "Essay newsletter";
-      const readerWorthy = items.length >= 1 ? items[0].readerWorthy : true;
+
+      // LLM returned nothing parseable — treat as not reader-worthy rather than
+      // silently forwarding with default "nice-to-have" guesses. Fall through
+      // to regular email processing.
+      if (items.length === 0) {
+        console.log(`  [newsletter:empty-classification] ${email.subject?.slice(0, 50)} — processing as regular email`);
+        return null;
+      }
+
+      const essayTier = items[0].tier;
+      const essayTopic = items[0].topic;
+      const essayConfidence = items[0].confidence;
+      const essayReason = items[0].reason;
+      const readerWorthy = items[0].readerWorthy;
 
       // Not reader-worthy (account updates, fund reports, etc.) — bail out and
       // let the caller process this as a normal email instead
