@@ -457,6 +457,8 @@ First, determine if this is READER-WORTHY — meaning it contains article-like c
 
 NOT reader-worthy: account updates, patron/membership updates, fund reports, community posts, product changelogs, event invites/RSVPs/AMAs, shipping notifications, surveys, short status updates, promotional emails, donation appeals, or any email under ~300 words that is primarily a call-to-action rather than substantive writing. These should stay as regular emails.
 
+Course/workshop signup reminders are NOT reader-worthy even when the topic (e.g. "Claude Code", "AI engineering") matches the reader's interests. Telltale signs: deadline/urgency language ("hours left", "last chance", "register now", "ends tonight"), pricing/discount hooks ("20% off", "early bird"), RSVP or ticket calls-to-action. Classify these as readerWorthy=false.
+
 If reader-worthy, classify relevance to the reader:
 - "must-read": Directly relevant to their work or core interests
 - "nice-to-have": Interesting but not urgent

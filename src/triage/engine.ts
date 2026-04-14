@@ -32,6 +32,30 @@ const NEWSLETTER_BYPASS_SENDERS = [
   "@luma-mail.com",
 ];
 
+/**
+ * Subject-line cues that mark an email as a promotional CTA (course signups,
+ * deadline reminders, sales) rather than substantive writing. These should
+ * never be forwarded to a reader app, even when the topic is relevant.
+ */
+const PROMO_SUBJECT_PATTERNS = [
+  /\b\d+\s*%\s*off\b/i,
+  /\bleft to register\b/i,
+  /\blast chance\b/i,
+  /\b\d+\s*hours?\s*left\b/i,
+  /\b\d+\s*days?\s*left\b/i,
+  /\bends (tonight|today|soon)\b/i,
+  /\bregister now\b/i,
+  /\bsale ends\b/i,
+  /\bearly bird\b/i,
+  /\bfinal call\b/i,
+  /\bdon['’]t miss\b/i,
+];
+
+function isPromoSubject(subject: string | null | undefined): boolean {
+  if (!subject) return false;
+  return PROMO_SUBJECT_PATTERNS.some((p) => p.test(subject));
+}
+
 export interface TriageEngineConfig {
   // Phase 1: Label only (default)
   // Phase 2: Label and archive
@@ -381,6 +405,14 @@ export class TriageEngine {
     config: ClassifierConfig
   ): Promise<TriageResult | null> {
     const fromEmail = email.from?.[0]?.email || "unknown";
+
+    // Deterministic bail-out: promotional subject lines (course signups,
+    // deadline/discount urgency) are never reader-worthy regardless of topic.
+    // Let these fall through to regular email processing.
+    if (isPromoSubject(email.subject)) {
+      console.log(`  [newsletter:promo-subject] ${email.subject?.slice(0, 60)} — processing as regular email`);
+      return null;
+    }
 
     // Eagerly fetch full email body for newsletter extraction
     const emailBody = await this.jmap.getEmailBody(email.id);

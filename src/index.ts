@@ -364,14 +364,28 @@ async function main(): Promise<void> {
           } catch (error) {
             console.error("Retroactive Readwise save failed:", error);
           }
+        } else if ((newTier === "must-read" || newTier === "nice-to-have") && item.readwiseDocId) {
+          // Tier-to-tier change: update location and tags in Readwise
+          try {
+            await readwise.update(item.readwiseDocId, {
+              location: newTier === "must-read" ? "new" : "later",
+              tags: [`tier:${newTier}`, item.topicTag ? `topic:${item.topicTag}` : ""].filter(Boolean),
+            });
+          } catch (error) {
+            console.error("Readwise tier update failed:", error);
+          }
         } else if (newTier === "skip" && item.readwiseDocId) {
           // Demote: delete from Readwise
           try {
             await readwise.delete(item.readwiseDocId);
-            await store.updateNewsletterItemReadwise(item.id, "pending", null, 0, null);
+            await store.updateNewsletterItemReadwise(item.id, null, null, 0, null);
           } catch (error) {
             console.error("Readwise delete failed:", error);
           }
+        } else if (newTier === "skip" && item.readwiseStatus) {
+          // Demote with no Readwise doc to delete (pending save that never landed,
+          // or prior failure). Clear the stale status so it isn't retried.
+          await store.updateNewsletterItemReadwise(item.id, null, null, 0, null);
         }
       }
 

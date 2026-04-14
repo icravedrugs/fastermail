@@ -705,7 +705,7 @@ export class Store {
 
   async updateNewsletterItemReadwise(
     itemId: number,
-    status: ReadwiseStatus,
+    status: ReadwiseStatus | null,
     docId: string | null,
     retryCount: number,
     nextRetryAfter: string | null
