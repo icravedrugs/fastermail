@@ -126,7 +126,9 @@ export async function initializeDatabase(client: Client): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_newsletter_items_email ON newsletter_items(email_id);
     CREATE INDEX IF NOT EXISTS idx_newsletter_items_readwise ON newsletter_items(readwise_status);
-    CREATE INDEX IF NOT EXISTS idx_newsletter_items_normalized_url ON newsletter_items(normalized_url);
+    -- idx_newsletter_items_normalized_url is created in the migrations block
+    -- below so it works for both new tables (with the column in CREATE TABLE)
+    -- and old tables (where the migration ALTER TABLE adds the column first).
 
     -- Tier corrections for newsletter items
     CREATE TABLE IF NOT EXISTS tier_corrections (
