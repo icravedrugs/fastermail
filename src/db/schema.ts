@@ -110,6 +110,7 @@ export async function initializeDatabase(client: Client): Promise<void> {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       email_id TEXT NOT NULL,
       url TEXT NOT NULL,
+      normalized_url TEXT,
       title TEXT,
       description TEXT,
       tier TEXT NOT NULL,
@@ -125,6 +126,7 @@ export async function initializeDatabase(client: Client): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_newsletter_items_email ON newsletter_items(email_id);
     CREATE INDEX IF NOT EXISTS idx_newsletter_items_readwise ON newsletter_items(readwise_status);
+    CREATE INDEX IF NOT EXISTS idx_newsletter_items_normalized_url ON newsletter_items(normalized_url);
 
     -- Tier corrections for newsletter items
     CREATE TABLE IF NOT EXISTS tier_corrections (
@@ -239,5 +241,22 @@ export async function initializeDatabase(client: Client): Promise<void> {
     );
   } catch {
     // Column already exists
+  }
+
+  // Migration: Add normalized_url column for cross-newsletter dedup
+  try {
+    await client.execute(
+      "ALTER TABLE newsletter_items ADD COLUMN normalized_url TEXT"
+    );
+  } catch {
+    // Column already exists
+  }
+
+  try {
+    await client.execute(
+      "CREATE INDEX IF NOT EXISTS idx_newsletter_items_normalized_url ON newsletter_items(normalized_url)"
+    );
+  } catch {
+    // Index may fail if column doesn't exist yet
   }
 }

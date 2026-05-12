@@ -78,6 +78,7 @@ export interface NewsletterItem {
   id: number;
   emailId: string;
   url: string;
+  normalizedUrl: string | null;
   title: string | null;
   description: string | null;
   tier: ItemTier;
@@ -658,17 +659,31 @@ export class Store {
   async saveNewsletterItem(item: Omit<NewsletterItem, 'id' | 'createdAt'>): Promise<number> {
     const result = await this.db.execute({
       sql: `INSERT INTO newsletter_items
-            (email_id, url, title, description, tier, topic_tag, confidence, reason,
+            (email_id, url, normalized_url, title, description, tier, topic_tag, confidence, reason,
              readwise_status, readwise_doc_id, retry_count, next_retry_after)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
-        item.emailId, item.url, item.title, item.description,
+        item.emailId, item.url, item.normalizedUrl ?? null, item.title, item.description,
         item.tier, item.topicTag, item.confidence, item.reason,
         item.readwiseStatus, item.readwiseDocId, item.retryCount,
         item.nextRetryAfter,
       ],
     });
     return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Has any prior newsletter item used this normalized URL? Used to skip
+   * cross-newsletter duplicates (e.g. a Stratechery recap re-linking earlier
+   * essays, every.to bumping the same article, two newsletters citing the
+   * same external piece).
+   */
+  async hasSeenNormalizedUrl(normalizedUrl: string): Promise<boolean> {
+    const result = await this.db.execute({
+      sql: "SELECT 1 FROM newsletter_items WHERE normalized_url = ? LIMIT 1",
+      args: [normalizedUrl],
+    });
+    return result.rows.length > 0;
   }
 
   async getNewsletterItemsByEmail(emailId: string): Promise<NewsletterItem[]> {
@@ -739,6 +754,7 @@ export class Store {
       id: row.id as number,
       emailId: row.email_id as string,
       url: row.url as string,
+      normalizedUrl: (row.normalized_url as string | null) ?? null,
       title: row.title as string | null,
       description: row.description as string | null,
       tier: row.tier as ItemTier,

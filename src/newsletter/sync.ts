@@ -2,6 +2,7 @@ import { ReadwiseClient } from "../readwise/index.js";
 import type { Store, NewsletterItem, ItemTier, ReadwiseStatus } from "../db/index.js";
 import type { ExtractedNewsletterItem } from "./extractor.js";
 import { computeExplorationRate } from "./feedback.js";
+import { normalizeArticleUrl } from "./url-normalizer.js";
 
 /**
  * Decide if a soft-skip item should be promoted via exploration.
@@ -31,13 +32,19 @@ export async function saveItemsToReadwise(
   newsletterFrom: string,
   readwise: ReadwiseClient,
   store: Store
-): Promise<{ saved: number; failed: number; skipped: number }> {
+): Promise<{ saved: number; failed: number; skipped: number; duplicates: number }> {
   let saved = 0;
   let failed = 0;
   let skipped = 0;
+  let duplicates = 0;
 
   // Compute adaptive exploration rate from reading feedback
   const explorationRate = await computeExplorationRate(store);
+
+  // Track URLs seen within this batch — a single newsletter often lists the
+  // same link twice (header card + footer roundup), and we'd otherwise
+  // create two DB rows before the dedup check below fires.
+  const seenInBatch = new Set<string>();
 
   for (const item of items) {
     // Check if this soft-skip should be promoted via exploration
@@ -47,10 +54,20 @@ export async function saveItemsToReadwise(
       ? `[exploration] ${item.reason}`
       : item.reason;
 
+    // Dedup against prior batches and within the current batch.
+    const normalizedUrl = normalizeArticleUrl(item.url);
+    if (seenInBatch.has(normalizedUrl) || (await store.hasSeenNormalizedUrl(normalizedUrl))) {
+      duplicates++;
+      console.log(`  [newsletter:dup] ${item.title?.slice(0, 60)} (${item.url.slice(0, 80)})`);
+      continue;
+    }
+    seenInBatch.add(normalizedUrl);
+
     // 1. Save to DB first
     const itemId = await store.saveNewsletterItem({
       emailId,
       url: item.url,
+      normalizedUrl,
       title: item.title,
       description: item.description,
       tier: effectiveTier,
@@ -110,7 +127,7 @@ export async function saveItemsToReadwise(
     }
   }
 
-  return { saved, failed, skipped };
+  return { saved, failed, skipped, duplicates };
 }
 
 /**

@@ -11,7 +11,7 @@ import {
 import { LabelManager } from "./labels.js";
 import { buildConfigFromStore } from "./rules.js";
 import { CorrectionProcessor } from "./corrections.js";
-import { ProfileLoader, extractAndClassifyItems, extractArticleUrl, resolveRedirectUrl } from "../newsletter/index.js";
+import { ProfileLoader, extractAndClassifyItems, extractArticleUrl, normalizeArticleUrl, resolveRedirectUrl } from "../newsletter/index.js";
 import { ReadwiseClient } from "../readwise/index.js";
 import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
 import { pollReadingProgress } from "../newsletter/feedback.js";
@@ -464,6 +464,27 @@ export class TriageEngine {
       const rawArticleUrl = html ? extractArticleUrl(html) : null;
       const essayUrl = rawArticleUrl ? await resolveRedirectUrl(rawArticleUrl) : null;
 
+      // Drop duplicates: if we've previously surfaced this article through
+      // any newsletter (recap, cross-newsletter mention, weekly re-bump),
+      // don't push it again. Only meaningful when there's a real URL — the
+      // SMTP fallback path uses a `forwarded:<emailId>` marker that's
+      // inherently unique per email so dedup wouldn't apply.
+      if (essayUrl && essayTier !== "skip") {
+        const normalizedEssayUrl = normalizeArticleUrl(essayUrl);
+        if (await this.store.hasSeenNormalizedUrl(normalizedEssayUrl)) {
+          console.log(`  [newsletter:essay:dup] ${email.subject?.slice(0, 60)} — already saved as ${essayUrl}`);
+          // Skip both DB save and Readwise push, but still trash the email
+          // below so it doesn't keep clogging the inbox on every poll.
+          try {
+            const trash = await this.jmap.findMailboxByRole("trash");
+            if (trash) await this.jmap.moveEmail(email.id, trash.id);
+          } catch (error) {
+            console.error(`Failed to trash duplicate newsletter ${email.id}:`, error);
+          }
+          return null;
+        }
+      }
+
       // Build author: LLM-extracted author, with newsletter name as fallback
       const newsletterName = email.from?.[0]?.name || null;
       const essayAuthor = items.length >= 1 && items[0].author
@@ -485,6 +506,7 @@ export class TriageEngine {
       const itemId = await this.store.saveNewsletterItem({
         emailId: email.id,
         url: dbUrl,
+        normalizedUrl: essayUrl ? normalizeArticleUrl(essayUrl) : null,
         title: email.subject || "(no subject)",
         description: classification.contentSummary || "",
         tier: essayTier as any,
@@ -564,7 +586,7 @@ export class TriageEngine {
         this.store
       );
 
-      console.log(`  [newsletter] ${email.subject?.slice(0, 50)} → ${items.length} items (${saveResult.saved} saved, ${saveResult.skipped} skipped)`);
+      console.log(`  [newsletter] ${email.subject?.slice(0, 50)} → ${items.length} items (${saveResult.saved} saved, ${saveResult.skipped} skipped, ${saveResult.duplicates} dup)`);
     }
 
     // Delete the newsletter (trash it — user can recover from trash if needed)

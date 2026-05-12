@@ -12,3 +12,4 @@ export {
   generateFeedbackDigestSection,
   pollReadingProgress,
 } from "./feedback.js";
+export { normalizeArticleUrl } from "./url-normalizer.js";
