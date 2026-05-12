@@ -1,6 +1,7 @@
 export { ProfileLoader, type ReaderProfile } from "./profile.js";
 export {
   extractAndClassifyItems,
+  extractArticleUrl,
   extractViewInBrowserUrl,
   resolveRedirectUrl,
   type ExtractedNewsletterItem,

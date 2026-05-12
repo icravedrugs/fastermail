@@ -64,25 +64,68 @@ function getEmailBodyText(email: Email): string {
 }
 
 /**
- * Try to extract a "view in browser" URL from newsletter HTML.
- * Many newsletters include this as a fallback link.
+ * Try to find the canonical article URL inside a newsletter HTML body.
+ *
+ * Readwise's /save/ endpoint marks docs as failed when the supplied URL is
+ * unreachable, so we need a URL that points to a real, fetchable article —
+ * not a synthetic placeholder. Strategies, in order:
+ *
+ *   1. Known canonical patterns embedded in the HTML (Substack open-link,
+ *      Substack publication subdomain, Marginal Revolution permalinks).
+ *   2. Anchor text patterns ("view in browser", "read on blog", "read in app",
+ *      etc.) — covers most well-behaved newsletters.
+ *   3. Every.to click trackers (base64-encoded canonical URL in the path).
  */
-export function extractViewInBrowserUrl(html: string): string | null {
-  const patterns = [
-    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?view\s+(?:in\s+)?(?:browser|online|web)/i,
-    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?read\s+(?:in\s+)?(?:browser|online|web)/i,
-    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]*?open\s+in\s+browser/i,
-  ];
+export function extractArticleUrl(html: string): string | null {
+  // 1. Substack "Read in app" / open-link canonical: stable, scrapeable URL.
+  const substackOpen = html.match(/https:\/\/open\.substack\.com\/pub\/[a-z0-9-]+\/p\/[a-z0-9-]+/i);
+  if (substackOpen) return substackOpen[0];
 
-  for (const pattern of patterns) {
+  // 1b. Substack publication subdomain (e.g. theleverage.substack.com/p/slug).
+  const substackSubdomain = html.match(/https:\/\/[a-z0-9-]+\.substack\.com\/p\/[a-z0-9-]+/i);
+  if (substackSubdomain) return substackSubdomain[0];
+
+  // 2. Anchor text patterns. Order matters — more specific phrasing first.
+  const anchorPatterns = [
+    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]{0,200}?view\s+(?:this\s+(?:email\s+)?(?:post\s+)?(?:in\s+)?)?(?:in\s+|on\s+)?(?:browser|online|the\s+web|web)/i,
+    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]{0,200}?read\s+(?:this\s+post\s+)?(?:in\s+|on\s+)?(?:browser|online|the\s+web|web|blog|app)/i,
+    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]{0,200}?open\s+(?:this\s+)?(?:in\s+)?(?:browser|app|the\s+web)/i,
+    /href\s*=\s*["']([^"']+)["'][^>]*>[\s\S]{0,200}?(?:see|continue)\s+(?:this\s+)?(?:post|article|reading)\s+(?:in\s+|on\s+)/i,
+  ];
+  for (const pattern of anchorPatterns) {
     const match = html.match(pattern);
     if (match && match[1].startsWith("http")) {
       return match[1];
     }
   }
 
+  // 3. Every.to click trackers carry the canonical URL inside a base64url
+  //    JSON blob: every.to/emails/click/<sig>/<base64>. The first base64
+  //    that decodes to a real every.to/p/<slug> wins (skips homepage/account
+  //    redirects that share the same tracker shape).
+  const everyTrackers = html.match(/every\.to\/emails\/click\/[^"' \/]+\/[A-Za-z0-9_-]+={0,2}/g);
+  if (everyTrackers) {
+    for (const tracker of everyTrackers) {
+      const b64 = tracker.split("/").pop()!;
+      try {
+        const decoded = Buffer.from(b64.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf-8");
+        const parsed = JSON.parse(decoded) as { url?: string };
+        if (parsed.url && /^https:\/\/every\.to\/(?:p|[a-z-]+)\/[a-z0-9-]+/i.test(parsed.url)) {
+          return parsed.url;
+        }
+      } catch {
+        // Not a valid base64-encoded JSON tracker — skip.
+      }
+    }
+  }
+
   return null;
 }
+
+/**
+ * Back-compat alias. Older code paths imported the narrower name.
+ */
+export const extractViewInBrowserUrl = extractArticleUrl;
 
 /**
  * Resolve a single redirect/tracking URL to its final destination.

@@ -11,7 +11,7 @@ import {
 import { LabelManager } from "./labels.js";
 import { buildConfigFromStore } from "./rules.js";
 import { CorrectionProcessor } from "./corrections.js";
-import { ProfileLoader, extractAndClassifyItems, extractViewInBrowserUrl, resolveRedirectUrl } from "../newsletter/index.js";
+import { ProfileLoader, extractAndClassifyItems, extractArticleUrl, resolveRedirectUrl } from "../newsletter/index.js";
 import { ReadwiseClient } from "../readwise/index.js";
 import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
 import { pollReadingProgress } from "../newsletter/feedback.js";
@@ -454,17 +454,15 @@ export class TriageEngine {
         return null;
       }
 
-      // Build the best URL: resolve "view in browser" link, fall back to sender domain
+      // Try to extract a real, canonical article URL from the email body.
+      // The Readwise /save/ endpoint marks docs as failed when given an
+      // unreachable URL (e.g. a synthesized `https://substack.com/fastermail/...`
+      // path), so a real URL is required for the API path to produce a
+      // readable doc. When extraction can't find one, fall back to SMTP
+      // forwarding — that path is content-readable but loses tag metadata.
       const html = getEmailBodyHtml(emailBody);
-      const rawViewUrl = html ? extractViewInBrowserUrl(html) : null;
-      let essayUrl: string;
-      if (rawViewUrl) {
-        essayUrl = await resolveRedirectUrl(rawViewUrl);
-      } else {
-        // Use sender domain so Readwise shows a meaningful origin
-        const senderDomain = fromEmail.split("@")[1] || "newsletter";
-        essayUrl = `https://${senderDomain}/fastermail/${email.id}`;
-      }
+      const rawArticleUrl = html ? extractArticleUrl(html) : null;
+      const essayUrl = rawArticleUrl ? await resolveRedirectUrl(rawArticleUrl) : null;
 
       // Build author: LLM-extracted author, with newsletter name as fallback
       const newsletterName = email.from?.[0]?.name || null;
@@ -474,32 +472,40 @@ export class TriageEngine {
             : items[0].author)
         : newsletterName;
 
-      // Store as single item in DB (for stats and correction UI)
+      const useApiSave = essayTier !== "skip" && this.readwise && essayUrl;
+      const useSmtpFallback = essayTier !== "skip" && !essayUrl && this.readwiseForwardEmail;
+
+      // Store as single item in DB (for stats and correction UI). For SMTP
+      // fallback the saved URL is a synthetic marker — we never call the
+      // Readwise API with it, so its unreachable status doesn't matter.
+      const dbUrl = essayUrl ?? `forwarded:${email.id}`;
+      const initialReadwiseStatus: "pending" | null = essayTier === "skip" || (!useApiSave && !useSmtpFallback)
+        ? null
+        : "pending";
       const itemId = await this.store.saveNewsletterItem({
         emailId: email.id,
-        url: essayUrl,
+        url: dbUrl,
         title: email.subject || "(no subject)",
         description: classification.contentSummary || "",
         tier: essayTier as any,
         topicTag: essayTopic,
         confidence: essayConfidence,
         reason: essayReason,
-        readwiseStatus: essayTier !== "skip" ? "pending" : null,
+        readwiseStatus: initialReadwiseStatus,
         readwiseDocId: null,
         retryCount: 0,
         nextRetryAfter: null,
       });
 
-      // Save to Readwise via API (replaces SMTP forwarding — preserves metadata)
-      if (essayTier !== "skip" && this.readwise) {
+      if (useApiSave) {
         const tags = [
           "tier:" + essayTier,
           "src:" + slugify(newsletterName || fromEmail),
           "topic:" + essayTopic,
         ];
         try {
-          const response = await this.readwise.save({
-            url: essayUrl,
+          const response = await this.readwise!.save({
+            url: essayUrl!,
             html: html || undefined,
             should_clean_html: true,
             title: email.subject || "(no subject)",
@@ -519,6 +525,31 @@ export class TriageEngine {
           const nextRetryAfter = new Date(Date.now() + 60_000).toISOString();
           await this.store.updateNewsletterItemReadwise(itemId, "failed", null, 1, nextRetryAfter);
         }
+      } else if (useSmtpFallback) {
+        // No canonical article URL — forward the email to Readwise via SMTP.
+        // Readwise's email ingestion handles raw email bodies reliably; the
+        // downside is no tier/src/topic tags get applied.
+        try {
+          const draftId = await this.jmap.createDraft({
+            to: [{ email: this.readwiseForwardEmail! }],
+            subject: email.subject || "(no subject)",
+            textBody: getEmailBodyText(emailBody),
+            htmlBody: html || undefined,
+          });
+          await this.jmap.sendEmail(draftId);
+          // SMTP-forwarded items don't get a doc id back; "saved" reflects
+          // that the forward succeeded even though Readwise's reader hasn't
+          // necessarily processed the email yet.
+          await this.store.updateNewsletterItemReadwise(itemId, "saved", null, 0, null);
+          console.log(`  [newsletter:essay] No canonical URL — SMTP-forwarded to Readwise: ${email.subject?.slice(0, 50)}`);
+        } catch (error) {
+          console.error(`Failed to SMTP-forward essay to Readwise:`, error);
+          await this.store.updateNewsletterItemReadwise(itemId, "failed", null, 1, null);
+        }
+      } else if (essayTier !== "skip") {
+        // No save path available (no Readwise token, no forward address).
+        // Item is still recorded in DB for stats but never reaches Readwise.
+        console.log(`  [newsletter:essay] No save path configured for: ${email.subject?.slice(0, 50)}`);
       }
 
       console.log(`  [newsletter:essay] ${email.subject?.slice(0, 50)} → ${essayTier}`);
