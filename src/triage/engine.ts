@@ -525,13 +525,21 @@ export class TriageEngine {
           "src:" + slugify(newsletterName || fromEmail),
           "topic:" + essayTopic,
         ];
+        // Diagnostic: Readwise's HTML cleaner (`should_clean_html: true`)
+        // marks our email-body saves as `status: fail` server-side, leaving
+        // docs with an empty body in Reader. Disabling cleaning makes
+        // Readwise store the HTML as-is, which renders reliably. The cost is
+        // that the email's chrome (header, unsubscribe, tracking pixels) is
+        // visible in the doc body — readable beats empty.
+        // When clean is off, Readwise requires both title AND author, so we
+        // always pass them (falling back to the newsletter name or sender).
         try {
           const response = await this.readwise!.save({
             url: essayUrl!,
             html: html || undefined,
-            should_clean_html: true,
+            should_clean_html: false,
             title: email.subject || "(no subject)",
-            author: essayAuthor || undefined,
+            author: essayAuthor || newsletterName || fromEmail,
             summary: classification.contentSummary || undefined,
             published_date: email.receivedAt?.split("T")[0],
             category: "email",
