@@ -22,8 +22,6 @@ export interface ClassificationResult {
   contentSummary: string;
   suggestedLabels: string[];
   contentFormat: ContentFormat;
-  isNewsletter: boolean;
-  newsletterConfidence: number;
 }
 
 export interface ClassifierConfig {
@@ -143,15 +141,6 @@ CONTENT FORMATS (for digest summarization):
 - "announcement": Public/broadcast message, community call, not personal to recipient
 - "transactional": Receipt, confirmation, order status, shipping update
 
-NEWSLETTER DETECTION:
-Determine if this email is a newsletter/subscription content. Consider:
-- Sender address contains "newsletter", "noreply", "digest", "updates", "info@", "hello@"
-- Sender domain is a known newsletter platform (substack.com, beehiiv.com, convertkit.com, mailchimp, etc.)
-- Email has subscription/list characteristics (mass-sent, not personal)
-- Content format is link_collection or article
-- Subject patterns: weekly/daily roundups, issue numbers, edition numbers
-Newsletter does NOT include: personal emails, transactional emails (receipts, confirmations), marketing blasts for specific products, account notifications
-
 EMAIL METADATA:
 - From: ${fromName} <${fromEmail}>
 - Subject: ${email.subject || "(no subject)"}
@@ -177,9 +166,7 @@ GOOD: "AI regulation updates in Europe. New study shows remote work increases pr
 BAD: "This email is a shipping notification for an order"
 GOOD: "Volvo XC60 rental return confirmed. Fuel dropped from 8/8 to 4/8. Mileage charges may apply."]
 LABELS: [comma-separated list of suggested labels like "newsletter", "receipt", "meeting", "personal", etc.]
-CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, transactional]
-IS_NEWSLETTER: [true or false]
-NEWSLETTER_CONFIDENCE: [0.0 to 1.0 - how confident you are about the newsletter classification]`;
+CONTENT_FORMAT: [one of: standard, link_collection, article, announcement, transactional]`;
 
     return prompt;
   }
@@ -193,8 +180,6 @@ NEWSLETTER_CONFIDENCE: [0.0 to 1.0 - how confident you are about the newsletter 
     let contentSummary = "";
     let suggestedLabels: string[] = [];
     let contentFormat: ContentFormat = "standard";
-    let isNewsletter = false;
-    let newsletterConfidence = 0.0;
 
     for (const line of lines) {
       if (line.startsWith("CLASSIFICATION:")) {
@@ -222,14 +207,6 @@ NEWSLETTER_CONFIDENCE: [0.0 to 1.0 - how confident you are about the newsletter 
           .split(",")
           .map((l) => l.trim().toLowerCase())
           .filter((l) => l.length > 0);
-      } else if (line.startsWith("IS_NEWSLETTER:")) {
-        const value = line.replace("IS_NEWSLETTER:", "").trim().toLowerCase();
-        isNewsletter = value === "true";
-      } else if (line.startsWith("NEWSLETTER_CONFIDENCE:")) {
-        const value = parseFloat(line.replace("NEWSLETTER_CONFIDENCE:", "").trim());
-        if (!isNaN(value) && value >= 0 && value <= 1) {
-          newsletterConfidence = value;
-        }
       } else if (line.startsWith("CONTENT_FORMAT:")) {
         const value = line.replace("CONTENT_FORMAT:", "").trim().toLowerCase();
         if (
@@ -251,8 +228,6 @@ NEWSLETTER_CONFIDENCE: [0.0 to 1.0 - how confident you are about the newsletter 
       contentSummary,
       suggestedLabels,
       contentFormat,
-      isNewsletter,
-      newsletterConfidence,
     };
   }
 
@@ -290,8 +265,6 @@ NEWSLETTER_CONFIDENCE: [0.0 to 1.0 - how confident you are about the newsletter 
             contentSummary: "",
             suggestedLabels: [],
             contentFormat: "standard",
-            isNewsletter: false,
-            newsletterConfidence: 0.0,
           });
         }
       });

@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type { JMAPClient, Email } from "../jmap/index.js";
 import type { Store, ProcessedEmail } from "../db/index.js";
 import type { ProfileManager } from "../sender/index.js";
@@ -11,51 +10,6 @@ import {
 import { LabelManager } from "./labels.js";
 import { buildConfigFromStore } from "./rules.js";
 import { CorrectionProcessor } from "./corrections.js";
-import { ProfileLoader, extractAndClassifyItems, extractArticleUrl, normalizeArticleUrl, resolveRedirectUrl } from "../newsletter/index.js";
-import { ReadwiseClient } from "../readwise/index.js";
-import { saveItemsToReadwise, retryFailedSaves } from "../newsletter/sync.js";
-import { pollReadingProgress } from "../newsletter/feedback.js";
-
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-/**
- * Senders whose emails look like link roundups but should stay in the inbox
- * as regular emails (not extracted for links or trashed).
- */
-const NEWSLETTER_BYPASS_SENDERS = [
-  "@moneysavingexpert.com",
-  "@luma-mail.com",
-  "@patreon.com",
-];
-
-/**
- * Subject-line cues that mark an email as a promotional CTA (course signups,
- * deadline reminders, sales) rather than substantive writing. These should
- * never be forwarded to a reader app, even when the topic is relevant.
- */
-const PROMO_SUBJECT_PATTERNS = [
-  /\b\d+\s*%\s*off\b/i,
-  /\bleft to register\b/i,
-  /\blast chance\b/i,
-  /\b\d+\s*hours?\s*left\b/i,
-  /\b\d+\s*days?\s*left\b/i,
-  /\bends (tonight|today|soon)\b/i,
-  /\bregister now\b/i,
-  /\bsale ends\b/i,
-  /\bearly bird\b/i,
-  /\bfinal call\b/i,
-  /\bdon['’]t miss\b/i,
-];
-
-function isPromoSubject(subject: string | null | undefined): boolean {
-  if (!subject) return false;
-  return PROMO_SUBJECT_PATTERNS.some((p) => p.test(subject));
-}
 
 export interface TriageEngineConfig {
   // Phase 1: Label only (default)
@@ -64,10 +18,6 @@ export interface TriageEngineConfig {
   anthropicApiKey: string;
   pollIntervalSeconds: number;
   userEmail: string;
-  readwiseToken?: string;
-  readerProfilePath?: string;
-  readwiseForwardEmail?: string; // For forwarding essay newsletters to Readwise
-  newsletterConfidenceGate?: number; // default 0.7
 }
 
 export interface TriageResult {
@@ -83,14 +33,8 @@ export class TriageEngine {
   private readonly classifier: EmailClassifier;
   private readonly labelManager: LabelManager;
   private readonly correctionProcessor: CorrectionProcessor;
-  private readonly anthropicClient: Anthropic;
-  private readonly readwise: ReadwiseClient | null;
-  private readonly profileLoader: ProfileLoader | null;
-  private readonly readwiseForwardEmail: string | null;
-  private readonly newsletterConfidenceGate: number;
   private running = false;
   private pollTimeout: NodeJS.Timeout | null = null;
-  private pollCount = 0;
   private inboxId: string | null = null;
   private archiveId: string | null = null;
 
@@ -108,11 +52,6 @@ export class TriageEngine {
       this.labelManager,
       config.anthropicApiKey
     );
-    this.anthropicClient = new Anthropic({ apiKey: config.anthropicApiKey });
-    this.readwise = config.readwiseToken ? new ReadwiseClient(config.readwiseToken) : null;
-    this.profileLoader = config.readerProfilePath ? new ProfileLoader(config.readerProfilePath) : null;
-    this.readwiseForwardEmail = config.readwiseForwardEmail ?? null;
-    this.newsletterConfidenceGate = config.newsletterConfidenceGate ?? 0.7;
   }
 
   async initialize(): Promise<void> {
@@ -178,32 +117,6 @@ export class TriageEngine {
         console.log(`Applied ${correctionsProcessed} user corrections`);
       }
 
-      // Retry any failed Readwise saves
-      if (this.readwise) {
-        try {
-          const retryResult = await retryFailedSaves(this.readwise, this.store);
-          if (retryResult.saved > 0 || retryResult.abandoned > 0) {
-            console.log(`Readwise retry: ${retryResult.saved} saved, ${retryResult.failed} still failing, ${retryResult.abandoned} abandoned`);
-          }
-        } catch (error) {
-          console.error("Readwise retry error:", error);
-        }
-      }
-
-      // Poll Readwise reading progress every ~10 poll cycles (~10 minutes)
-      this.pollCount++;
-      if (this.config.readwiseToken && this.pollCount % 10 === 0) {
-        try {
-          const progressResult = await pollReadingProgress(this.store, this.config.readwiseToken);
-          if (progressResult.signals > 0) {
-            console.log(`Reading progress: checked ${progressResult.checked}, ${progressResult.signals} new signals`);
-          }
-        } catch (error) {
-          console.error("Reading progress poll error:", error);
-        }
-      }
-
-      // Then process new emails
       return await this.processNewEmails();
     } catch (error) {
       console.error("Poll error:", error);
@@ -301,35 +214,6 @@ export class TriageEngine {
       config
     );
 
-    // Newsletter pipeline: extract items, save to Readwise, trash
-    // Two detection paths:
-    // 1. LLM explicitly flagged it as newsletter with high confidence
-    // 2. Content format is article/link_collection AND classification is low-priority/fyi
-    //    (catches newsletters from custom domains like stratechery.com that the LLM misses)
-    const isNewsletterBypassed = NEWSLETTER_BYPASS_SENDERS.some((domain) =>
-      fromEmail?.toLowerCase().endsWith(domain)
-    );
-    const isLikelyNewsletter =
-      !isNewsletterBypassed &&
-      ((classification.isNewsletter && classification.newsletterConfidence >= this.newsletterConfidenceGate) ||
-       ((classification.contentFormat === "article" || classification.contentFormat === "link_collection") &&
-        (classification.classification === "low-priority" || classification.classification === "fyi")));
-
-    if (
-      isLikelyNewsletter &&
-      this.readwise &&
-      this.profileLoader
-    ) {
-      try {
-        const result = await this.processNewsletterEmail(email, classification, config);
-        if (result) return result;
-        // null = not reader-worthy, fall through to regular processing
-      } catch (error) {
-        console.error(`Newsletter processing failed for ${email.id}, falling back to operational:`, error);
-        // Fall through to regular processing
-      }
-    }
-
     // Apply labels
     const labelsApplied: string[] = [classification.classification];
     await this.labelManager.applyClassificationLabel(
@@ -400,245 +284,6 @@ export class TriageEngine {
     };
   }
 
-  private async processNewsletterEmail(
-    email: Email,
-    classification: { classification: Classification; confidence: number; reasoning: string; contentSummary: string; suggestedLabels: string[]; contentFormat: ContentFormat; isNewsletter: boolean; newsletterConfidence: number },
-    config: ClassifierConfig
-  ): Promise<TriageResult | null> {
-    const fromEmail = email.from?.[0]?.email || "unknown";
-
-    // Deterministic bail-out: promotional subject lines (course signups,
-    // deadline/discount urgency) are never reader-worthy regardless of topic.
-    // Let these fall through to regular email processing.
-    if (isPromoSubject(email.subject)) {
-      console.log(`  [newsletter:promo-subject] ${email.subject?.slice(0, 60)} — processing as regular email`);
-      return null;
-    }
-
-    // Eagerly fetch full email body for newsletter extraction
-    const emailBody = await this.jmap.getEmailBody(email.id);
-
-    // Load reader profile
-    const profile = await this.profileLoader!.load();
-
-    // Get recent tier corrections for few-shot learning
-    const corrections = await this.store.getRecentTierCorrections(20);
-
-    // Decide essay vs link-collection BEFORE extraction.
-    // Articles contain reference links but the value is the essay itself — forward it whole.
-    // Only link_collection format should go through link extraction.
-    const isEssay = classification.contentFormat !== "link_collection";
-
-    if (isEssay) {
-      // Classify the essay's relevance without extracting links
-      const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
-
-      // LLM returned nothing parseable — treat as not reader-worthy rather than
-      // silently forwarding with default "nice-to-have" guesses. Fall through
-      // to regular email processing.
-      if (items.length === 0) {
-        console.log(`  [newsletter:empty-classification] ${email.subject?.slice(0, 50)} — processing as regular email`);
-        return null;
-      }
-
-      const essayTier = items[0].tier;
-      const essayTopic = items[0].topic;
-      const essayConfidence = items[0].confidence;
-      const essayReason = items[0].reason;
-      const readerWorthy = items[0].readerWorthy;
-
-      // Not reader-worthy (account updates, fund reports, etc.) — bail out and
-      // let the caller process this as a normal email instead
-      if (!readerWorthy) {
-        console.log(`  [newsletter:not-reader-worthy] ${email.subject?.slice(0, 50)} — processing as regular email`);
-        return null;
-      }
-
-      // Try to extract a real, canonical article URL from the email body.
-      // The Readwise /save/ endpoint marks docs as failed when given an
-      // unreachable URL (e.g. a synthesized `https://substack.com/fastermail/...`
-      // path), so a real URL is required for the API path to produce a
-      // readable doc. When extraction can't find one, fall back to SMTP
-      // forwarding — that path is content-readable but loses tag metadata.
-      const html = getEmailBodyHtml(emailBody);
-      const rawArticleUrl = html ? extractArticleUrl(html) : null;
-      const essayUrl = rawArticleUrl ? await resolveRedirectUrl(rawArticleUrl) : null;
-
-      // Drop duplicates: if we've previously surfaced this article through
-      // any newsletter (recap, cross-newsletter mention, weekly re-bump),
-      // don't push it again. Only meaningful when there's a real URL — the
-      // SMTP fallback path uses a `forwarded:<emailId>` marker that's
-      // inherently unique per email so dedup wouldn't apply.
-      if (essayUrl && essayTier !== "skip") {
-        const normalizedEssayUrl = normalizeArticleUrl(essayUrl);
-        if (await this.store.hasSeenNormalizedUrl(normalizedEssayUrl)) {
-          console.log(`  [newsletter:essay:dup] ${email.subject?.slice(0, 60)} — already saved as ${essayUrl}`);
-          // Skip both DB save and Readwise push, but still trash the email
-          // below so it doesn't keep clogging the inbox on every poll.
-          try {
-            const trash = await this.jmap.findMailboxByRole("trash");
-            if (trash) await this.jmap.moveEmail(email.id, trash.id);
-          } catch (error) {
-            console.error(`Failed to trash duplicate newsletter ${email.id}:`, error);
-          }
-          return null;
-        }
-      }
-
-      // Build author: LLM-extracted author, with newsletter name as fallback
-      const newsletterName = email.from?.[0]?.name || null;
-      const essayAuthor = items.length >= 1 && items[0].author
-        ? (newsletterName && items[0].author !== newsletterName
-            ? `${items[0].author}, ${newsletterName}`
-            : items[0].author)
-        : newsletterName;
-
-      const useApiSave = essayTier !== "skip" && this.readwise && essayUrl;
-      const useSmtpFallback = essayTier !== "skip" && !essayUrl && this.readwiseForwardEmail;
-
-      // Store as single item in DB (for stats and correction UI). For SMTP
-      // fallback the saved URL is a synthetic marker — we never call the
-      // Readwise API with it, so its unreachable status doesn't matter.
-      const dbUrl = essayUrl ?? `forwarded:${email.id}`;
-      const initialReadwiseStatus: "pending" | null = essayTier === "skip" || (!useApiSave && !useSmtpFallback)
-        ? null
-        : "pending";
-      const itemId = await this.store.saveNewsletterItem({
-        emailId: email.id,
-        url: dbUrl,
-        normalizedUrl: essayUrl ? normalizeArticleUrl(essayUrl) : null,
-        title: email.subject || "(no subject)",
-        description: classification.contentSummary || "",
-        tier: essayTier as any,
-        topicTag: essayTopic,
-        confidence: essayConfidence,
-        reason: essayReason,
-        readwiseStatus: initialReadwiseStatus,
-        readwiseDocId: null,
-        retryCount: 0,
-        nextRetryAfter: null,
-      });
-
-      if (useApiSave) {
-        const tags = [
-          "tier:" + essayTier,
-          "src:" + slugify(newsletterName || fromEmail),
-          "topic:" + essayTopic,
-        ];
-        // Diagnostic: Readwise's HTML cleaner (`should_clean_html: true`)
-        // marks our email-body saves as `status: fail` server-side, leaving
-        // docs with an empty body in Reader. Disabling cleaning makes
-        // Readwise store the HTML as-is, which renders reliably. The cost is
-        // that the email's chrome (header, unsubscribe, tracking pixels) is
-        // visible in the doc body — readable beats empty.
-        // When clean is off, Readwise requires both title AND author, so we
-        // always pass them (falling back to the newsletter name or sender).
-        try {
-          const response = await this.readwise!.save({
-            url: essayUrl!,
-            html: html || undefined,
-            should_clean_html: false,
-            title: email.subject || "(no subject)",
-            author: essayAuthor || newsletterName || fromEmail,
-            summary: classification.contentSummary || undefined,
-            published_date: email.receivedAt?.split("T")[0],
-            category: "email",
-            tags,
-            notes: essayReason,
-            location: essayTier === "must-read" ? "new" : "later",
-            saved_using: "fastermail",
-          });
-          await this.store.updateNewsletterItemReadwise(itemId, "saved", response.id, 0, null);
-          console.log(`  [newsletter:essay] Saved to Readwise via API: ${email.subject?.slice(0, 50)}`);
-        } catch (error) {
-          console.error(`Failed to save essay to Readwise:`, error);
-          const nextRetryAfter = new Date(Date.now() + 60_000).toISOString();
-          await this.store.updateNewsletterItemReadwise(itemId, "failed", null, 1, nextRetryAfter);
-        }
-      } else if (useSmtpFallback) {
-        // No canonical article URL — forward the email to Readwise via SMTP.
-        // Readwise's email ingestion handles raw email bodies reliably; the
-        // downside is no tier/src/topic tags get applied.
-        try {
-          const draftId = await this.jmap.createDraft({
-            to: [{ email: this.readwiseForwardEmail! }],
-            subject: email.subject || "(no subject)",
-            textBody: getEmailBodyText(emailBody),
-            htmlBody: html || undefined,
-          });
-          await this.jmap.sendEmail(draftId);
-          // SMTP-forwarded items don't get a doc id back; "saved" reflects
-          // that the forward succeeded even though Readwise's reader hasn't
-          // necessarily processed the email yet.
-          await this.store.updateNewsletterItemReadwise(itemId, "saved", null, 0, null);
-          console.log(`  [newsletter:essay] No canonical URL — SMTP-forwarded to Readwise: ${email.subject?.slice(0, 50)}`);
-        } catch (error) {
-          console.error(`Failed to SMTP-forward essay to Readwise:`, error);
-          await this.store.updateNewsletterItemReadwise(itemId, "failed", null, 1, null);
-        }
-      } else if (essayTier !== "skip") {
-        // No save path available (no Readwise token, no forward address).
-        // Item is still recorded in DB for stats but never reaches Readwise.
-        console.log(`  [newsletter:essay] No save path configured for: ${email.subject?.slice(0, 50)}`);
-      }
-
-      console.log(`  [newsletter:essay] ${email.subject?.slice(0, 50)} → ${essayTier}`);
-    } else {
-      // Link-collection: extract and classify individual links
-      const items = await extractAndClassifyItems(emailBody, profile, corrections, this.anthropicClient);
-      const saveResult = await saveItemsToReadwise(
-        items,
-        email.id,
-        email.from?.[0]?.name || fromEmail,
-        this.readwise!,
-        this.store
-      );
-
-      console.log(`  [newsletter] ${email.subject?.slice(0, 50)} → ${items.length} items (${saveResult.saved} saved, ${saveResult.skipped} skipped, ${saveResult.duplicates} dup)`);
-    }
-
-    // Delete the newsletter (trash it — user can recover from trash if needed)
-    try {
-      const trash = await this.jmap.findMailboxByRole("trash");
-      if (trash) {
-        await this.jmap.moveEmail(email.id, trash.id);
-      }
-    } catch (error) {
-      console.error(`Failed to trash newsletter ${email.id}:`, error);
-    }
-
-    // Save to processed_emails with is_newsletter = true
-    const pendingDigest = await this.store.getPendingDigest();
-    const processed: ProcessedEmail = {
-      id: email.id,
-      threadId: email.threadId,
-      fromEmail,
-      fromName: email.from?.[0]?.name || null,
-      subject: email.subject,
-      receivedAt: email.receivedAt,
-      processedAt: new Date().toISOString(),
-      classification: classification.classification,
-      confidence: classification.confidence,
-      reasoning: classification.reasoning,
-      contentSummary: classification.contentSummary,
-      labelsApplied: classification.suggestedLabels.join(","),
-      actionTaken: "deleted",
-      contentFormat: classification.contentFormat,
-      digestId: pendingDigest.id,
-      isNewsletter: true,
-    };
-    await this.store.saveProcessedEmail(processed);
-
-    return {
-      emailId: email.id,
-      classification: classification.classification,
-      confidence: classification.confidence,
-      reasoning: classification.reasoning,
-      labelsApplied: classification.suggestedLabels,
-      actionTaken: "archived",
-    };
-  }
-
   private async markAsProcessed(
     email: Email,
     classification: Classification,
@@ -668,7 +313,6 @@ export class TriageEngine {
       actionTaken,
       contentFormat,
       digestId: pendingDigest.id,
-      isNewsletter: false,
     };
 
     await this.store.saveProcessedEmail(processed);
@@ -692,39 +336,4 @@ export class TriageEngine {
   }> {
     return this.store.getEmailStats();
   }
-}
-
-// Helper functions for email body extraction (used by processNewsletterEmail for forwarding)
-function getEmailBodyText(email: Email): string {
-  if (!email.bodyValues) return email.preview || "";
-  if (email.textBody) {
-    for (const part of email.textBody) {
-      if (part.partId && email.bodyValues[part.partId]) {
-        return email.bodyValues[part.partId].value;
-      }
-    }
-  }
-  if (email.htmlBody) {
-    for (const part of email.htmlBody) {
-      if (part.partId && email.bodyValues[part.partId]) {
-        return email.bodyValues[part.partId].value
-          .replace(/<[^>]+>/g, " ")
-          .replace(/&nbsp;/g, " ")
-          .replace(/&amp;/g, "&")
-          .replace(/\s+/g, " ")
-          .trim();
-      }
-    }
-  }
-  return email.preview || "";
-}
-
-function getEmailBodyHtml(email: Email): string | null {
-  if (!email.bodyValues || !email.htmlBody) return null;
-  for (const part of email.htmlBody) {
-    if (part.partId && email.bodyValues[part.partId]) {
-      return email.bodyValues[part.partId].value;
-    }
-  }
-  return null;
 }

@@ -1,9 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Store, ProcessedEmail, NewsletterItem } from "../db/index.js";
-import type { JMAPClient, Email } from "../jmap/index.js";
-import { applySummaryStrategy, requiresEmailBody, extractLinksWithLLM, type DigestItem } from "./strategies.js";
+import type { Store, ProcessedEmail } from "../db/index.js";
+import type { JMAPClient } from "../jmap/index.js";
+import { applySummaryStrategy, requiresEmailBody } from "./strategies.js";
 import type { ExtractedLink } from "./link-extractor.js";
-import { generateFeedbackDigestSection } from "../newsletter/feedback.js";
 
 export interface DigestConfig {
   anthropicApiKey: string;
@@ -57,10 +56,6 @@ export class DigestGenerator {
       (e) => e.fromEmail.toLowerCase() !== this.config.userEmail.toLowerCase()
     );
 
-    // Split into newsletter and operational emails
-    const newsletterEmails = digestEmails.filter((e) => e.isNewsletter);
-    const operationalEmails = digestEmails.filter((e) => !e.isNewsletter);
-
     if (digestEmails.length === 0) {
       console.log("No emails to include in digest");
       return null;
@@ -69,7 +64,7 @@ export class DigestGenerator {
     console.log(`Generating digest for ${digestEmails.length} emails...`);
 
     // Group emails by category/type
-    const grouped = this.groupEmails(operationalEmails);
+    const grouped = this.groupEmails(digestEmails);
 
     // Generate summaries for each group
     const sections: DigestSection[] = [];
@@ -84,55 +79,13 @@ export class DigestGenerator {
       });
     }
 
-    // Add newsletter intelligence stats section
-    if (newsletterEmails.length > 0) {
-      const stats = await this.store.getNewsletterStats(pendingDigest.id);
-      const newsletterItems = await this.store.getNewsletterItemsByDigest(pendingDigest.id);
-
-      // Find uncertain items (low confidence)
-      const uncertainItems = newsletterItems.filter((item) => item.confidence < 0.6);
-
-      sections.unshift({
-        title: "Newsletter Intelligence",
-        items: [{
-          emailId: "newsletter-stats",
-          threadId: "newsletter-stats",
-          from: "Fastermail",
-          subject: `${stats.newslettersProcessed} newsletters processed`,
-          summary: this.buildNewsletterStatsSummary(stats, uncertainItems),
-        }],
-      });
-    }
-
-    // Generate correction token for the review UI
-    let correctionsUrl: string | null = null;
-    if (this.config.baseUrl && newsletterEmails.length > 0) {
-      const correctionToken = await this.store.createCorrectionToken(pendingDigest.id);
-      correctionsUrl = `${this.config.baseUrl}/corrections?token=${correctionToken}`;
-    }
-
-    // Add reading feedback section if there's data
-    const feedbackSection = await generateFeedbackDigestSection(this.store);
-    if (feedbackSection) {
-      sections.push({
-        title: "Reading Insights",
-        items: [{
-          emailId: "reading-feedback",
-          threadId: "reading-feedback",
-          from: "Fastermail",
-          subject: "Your reading activity",
-          summary: feedbackSection,
-        }],
-      });
-    }
-
     // Generate HTML and text bodies with cleanup link
     const cleanupUrl = this.config.baseUrl && pendingDigest.cleanupToken
       ? `${this.config.baseUrl}/cleanup?token=${pendingDigest.cleanupToken}`
       : null;
 
-    const htmlBody = this.generateHtml(sections, cleanupUrl, this.config.baseUrl, correctionsUrl);
-    const textBody = this.generateText(sections, cleanupUrl, this.config.baseUrl, correctionsUrl);
+    const htmlBody = this.generateHtml(sections, cleanupUrl, this.config.baseUrl);
+    const textBody = this.generateText(sections, cleanupUrl, this.config.baseUrl);
 
     return {
       id: pendingDigest.id,
@@ -203,12 +156,8 @@ export class DigestGenerator {
 
     for (const email of emails) {
       try {
-        // Fetch email body if:
-        // 1. Content format requires it (link_collection, article, transactional)
-        // 2. OR this is a newsletter (always check for links as fallback)
-        const isNewsletter = category === "newsletters";
         let emailBody = null;
-        if (requiresEmailBody(email.contentFormat) || isNewsletter) {
+        if (requiresEmailBody(email.contentFormat)) {
           try {
             emailBody = await this.jmap.getEmailBody(email.id);
           } catch (error) {
@@ -216,30 +165,7 @@ export class DigestGenerator {
           }
         }
 
-        // Apply the appropriate strategy
-        let item = await applySummaryStrategy(email, emailBody, this.client);
-
-        // For newsletters classified as "standard", try LLM link extraction anyway
-        // This catches link roundups that weren't detected during classification
-        if (isNewsletter && email.contentFormat === "standard" && !item.links?.length && emailBody) {
-          const html = this.getEmailBodyHtml(emailBody);
-          if (html) {
-            try {
-              const emailText = this.getEmailBodyText(emailBody);
-              const links = await extractLinksWithLLM(
-                html,
-                emailText,
-                email.subject || "",
-                this.client
-              );
-              if (links.length > 0) {
-                item = { ...item, links };
-              }
-            } catch (error) {
-              console.error("LLM link extraction failed for newsletter fallback:", error);
-            }
-          }
-        }
+        const item = await applySummaryStrategy(email, emailBody, this.client);
 
         results.push({
           emailId: item.emailId,
@@ -265,70 +191,6 @@ export class DigestGenerator {
     return results;
   }
 
-  private getEmailBodyText(email: Email): string {
-    if (!email.bodyValues) return email.preview || "";
-    if (email.textBody) {
-      for (const part of email.textBody) {
-        if (part.partId && email.bodyValues[part.partId]) {
-          return email.bodyValues[part.partId].value;
-        }
-      }
-    }
-    if (email.htmlBody) {
-      for (const part of email.htmlBody) {
-        if (part.partId && email.bodyValues[part.partId]) {
-          return email.bodyValues[part.partId].value
-            .replace(/<[^>]+>/g, " ")
-            .replace(/&nbsp;/g, " ")
-            .replace(/&amp;/g, "&")
-            .replace(/\s+/g, " ")
-            .trim();
-        }
-      }
-    }
-    return email.preview || "";
-  }
-
-  private getEmailBodyHtml(email: Email): string | null {
-    if (!email.bodyValues || !email.htmlBody) return null;
-
-    for (const part of email.htmlBody) {
-      if (part.partId && email.bodyValues[part.partId]) {
-        return email.bodyValues[part.partId].value;
-      }
-    }
-
-    return null;
-  }
-
-  private buildNewsletterStatsSummary(
-    stats: { newslettersProcessed: number; itemsExtracted: number; itemsByTier: Record<string, number>; itemsSaved: number; itemsFailed: number; itemsAbandoned: number },
-    uncertainItems: NewsletterItem[]
-  ): string {
-    const parts: string[] = [];
-    parts.push(`${stats.itemsExtracted} items extracted`);
-
-    const mustRead = stats.itemsByTier["must-read"] || 0;
-    const niceToHave = stats.itemsByTier["nice-to-have"] || 0;
-    const skipped = stats.itemsByTier["skip"] || 0;
-
-    parts.push(`${stats.itemsSaved} sent to Readwise (${mustRead} must-read, ${niceToHave} nice-to-have)`);
-    if (skipped > 0) parts.push(`${skipped} skipped`);
-    if (stats.itemsFailed > 0) parts.push(`⚠️ ${stats.itemsFailed} failed to save`);
-    if (stats.itemsAbandoned > 0) parts.push(`❌ ${stats.itemsAbandoned} abandoned after retries`);
-
-    let summary = parts.join(". ") + ".";
-
-    if (uncertainItems.length > 0) {
-      summary += "\n\nUncertain classifications:";
-      for (const item of uncertainItems.slice(0, 5)) {
-        summary += `\n• "${item.title || item.url}" → ${item.tier} (${Math.round(item.confidence * 100)}%)`;
-      }
-    }
-
-    return summary;
-  }
-
   private formatCategoryTitle(category: string): string {
     const titles: Record<string, string> = {
       newsletters: "Newsletters",
@@ -349,7 +211,7 @@ export class DigestGenerator {
       .replace(/'/g, "&#39;");
   }
 
-  private generateHtml(sections: DigestSection[], cleanupUrl: string | null, baseUrl?: string, correctionsUrl?: string | null): string {
+  private generateHtml(sections: DigestSection[], cleanupUrl: string | null, baseUrl?: string): string {
     const sectionHtml = sections
       .filter((s) => s.items.length > 0)
       .map(
@@ -409,11 +271,6 @@ export class DigestGenerator {
     <p style="color: #666; margin-top: 8px;">${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
   </div>
   ${sectionHtml}
-  ${correctionsUrl ? `
-  <div style="text-align: center; margin-top: 16px; padding: 12px; background: #f0f4ff; border-radius: 8px;">
-    <a href="${correctionsUrl}" style="color: #0066cc; text-decoration: none; font-size: 14px;">📝 Review & correct newsletter item classifications</a>
-  </div>
-  ` : ""}
   ${cleanupUrl ? `
   <div style="text-align: center; margin-top: 32px; padding: 20px; background: #f5f5f5; border-radius: 8px;">
     <p style="margin: 0 0 12px 0; color: #333; font-size: 14px;">Done reviewing? Click below to archive these emails.</p>
@@ -428,7 +285,7 @@ export class DigestGenerator {
 </html>`;
   }
 
-  private generateText(sections: DigestSection[], cleanupUrl: string | null, baseUrl?: string, correctionsUrl?: string | null): string {
+  private generateText(sections: DigestSection[], cleanupUrl: string | null, baseUrl?: string): string {
     const sectionText = sections
       .filter((s) => s.items.length > 0)
       .map(
@@ -457,13 +314,6 @@ export class DigestGenerator {
       )
       .join("\n\n---\n\n");
 
-    const correctionsSection = correctionsUrl ? `
-
----
-
-REVIEW NEWSLETTER CLASSIFICATIONS:
-${correctionsUrl}` : "";
-
     const cleanupSection = cleanupUrl ? `
 
 ---
@@ -476,7 +326,7 @@ ${cleanupUrl}` : "";
     return `# Your Email Digest
 ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
 
-${sectionText}${correctionsSection}${cleanupSection}
+${sectionText}${cleanupSection}
 
 ---
 Generated by Fastermail${this.config.instanceId ? ` | Instance: ${this.config.instanceId}` : ""}`;

@@ -105,66 +105,6 @@ export async function initializeDatabase(client: Client): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_corrections_classification ON corrections(corrected_classification);
 
-    -- Newsletter extracted items
-    CREATE TABLE IF NOT EXISTS newsletter_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email_id TEXT NOT NULL,
-      url TEXT NOT NULL,
-      normalized_url TEXT,
-      title TEXT,
-      description TEXT,
-      tier TEXT NOT NULL,
-      topic_tag TEXT,
-      confidence REAL DEFAULT 0.5,
-      reason TEXT,
-      readwise_status TEXT,
-      readwise_doc_id TEXT,
-      retry_count INTEGER DEFAULT 0,
-      next_retry_after TEXT,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_newsletter_items_email ON newsletter_items(email_id);
-    CREATE INDEX IF NOT EXISTS idx_newsletter_items_readwise ON newsletter_items(readwise_status);
-    -- idx_newsletter_items_normalized_url is created in the migrations block
-    -- below so it works for both new tables (with the column in CREATE TABLE)
-    -- and old tables (where the migration ALTER TABLE adds the column first).
-
-    -- Tier corrections for newsletter items
-    CREATE TABLE IF NOT EXISTS tier_corrections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      item_id INTEGER NOT NULL,
-      original_tier TEXT NOT NULL,
-      corrected_tier TEXT NOT NULL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    -- Correction tokens for web UI access
-    CREATE TABLE IF NOT EXISTS correction_tokens (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token TEXT UNIQUE NOT NULL,
-      digest_id INTEGER NOT NULL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      expires_at TEXT NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_correction_tokens_token ON correction_tokens(token);
-
-    -- Reading feedback from Readwise (webhook events + polling)
-    CREATE TABLE IF NOT EXISTS reading_feedback (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      item_id INTEGER NOT NULL,
-      readwise_doc_id TEXT,
-      signal_type TEXT NOT NULL,
-      reading_progress REAL,
-      highlighted_text TEXT,
-      event_timestamp TEXT NOT NULL,
-      processed INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_reading_feedback_item ON reading_feedback(item_id);
-    CREATE INDEX IF NOT EXISTS idx_reading_feedback_processed ON reading_feedback(processed);
   `);
 
   // Migration: Add content_format column if it doesn't exist (for existing databases)
@@ -236,29 +176,4 @@ export async function initializeDatabase(client: Client): Promise<void> {
     // Index may fail if column doesn't exist yet
   }
 
-  // Migration: Add is_newsletter column to processed_emails
-  try {
-    await client.execute(
-      "ALTER TABLE processed_emails ADD COLUMN is_newsletter INTEGER DEFAULT 0"
-    );
-  } catch {
-    // Column already exists
-  }
-
-  // Migration: Add normalized_url column for cross-newsletter dedup
-  try {
-    await client.execute(
-      "ALTER TABLE newsletter_items ADD COLUMN normalized_url TEXT"
-    );
-  } catch {
-    // Column already exists
-  }
-
-  try {
-    await client.execute(
-      "CREATE INDEX IF NOT EXISTS idx_newsletter_items_normalized_url ON newsletter_items(normalized_url)"
-    );
-  } catch {
-    // Index may fail if column doesn't exist yet
-  }
 }

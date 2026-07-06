@@ -25,7 +25,6 @@ export interface ProcessedEmail {
   actionTaken: string | null;
   contentFormat: ContentFormat;
   digestId: number | null;
-  isNewsletter: boolean;
 }
 
 export interface SenderProfile {
@@ -71,57 +70,6 @@ export interface Correction {
   createdAt?: string;
 }
 
-export type ItemTier = "must-read" | "nice-to-have" | "skip";
-export type ReadwiseStatus = "pending" | "saved" | "failed" | "abandoned";
-
-export interface NewsletterItem {
-  id: number;
-  emailId: string;
-  url: string;
-  normalizedUrl: string | null;
-  title: string | null;
-  description: string | null;
-  tier: ItemTier;
-  topicTag: string | null;
-  confidence: number;
-  reason: string | null;
-  readwiseStatus: ReadwiseStatus | null;
-  readwiseDocId: string | null;
-  retryCount: number;
-  nextRetryAfter: string | null;
-  createdAt: string;
-}
-
-export interface TierCorrection {
-  id: number;
-  itemId: number;
-  originalTier: ItemTier;
-  correctedTier: ItemTier;
-  createdAt: string;
-}
-
-export interface CorrectionToken {
-  id: number;
-  token: string;
-  digestId: number;
-  createdAt: string;
-  expiresAt: string;
-}
-
-export type FeedbackSignal = 'highlight_created' | 'document_finished' | 'progress_update';
-
-export interface ReadingFeedback {
-  id: number;
-  itemId: number;
-  readwiseDocId: string | null;
-  signalType: FeedbackSignal;
-  readingProgress: number | null;
-  highlightedText: string | null;
-  eventTimestamp: string;
-  processed: boolean;
-  createdAt: string;
-}
-
 // Store class
 
 export class Store {
@@ -141,8 +89,8 @@ export class Store {
     await this.db.execute({
       sql: `INSERT OR REPLACE INTO processed_emails
             (id, thread_id, from_email, from_name, subject, received_at,
-             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id, is_newsletter)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         email.id,
         email.threadId,
@@ -159,7 +107,6 @@ export class Store {
         email.actionTaken,
         email.contentFormat,
         email.digestId,
-        email.isNewsletter ? 1 : 0,
       ],
     });
   }
@@ -188,7 +135,6 @@ export class Store {
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
       digestId: row.digest_id as number | null,
-      isNewsletter: Boolean(row.is_newsletter),
     }));
   }
 
@@ -220,7 +166,6 @@ export class Store {
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
       digestId: row.digest_id as number | null,
-      isNewsletter: Boolean(row.is_newsletter),
     }));
   }
 
@@ -482,7 +427,6 @@ export class Store {
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
       digestId: row.digest_id as number | null,
-      isNewsletter: Boolean(row.is_newsletter),
     }));
   }
 
@@ -638,7 +582,6 @@ export class Store {
       actionTaken: row.action_taken as string | null,
       contentFormat: (row.content_format as ContentFormat) || "standard",
       digestId: row.digest_id as number | null,
-      isNewsletter: Boolean(row.is_newsletter),
     };
   }
 
@@ -652,371 +595,6 @@ export class Store {
             WHERE id = ?`,
       args: [newClassification, new Date().toISOString(), emailId],
     });
-  }
-
-  // ============ Newsletter Items ============
-
-  async saveNewsletterItem(item: Omit<NewsletterItem, 'id' | 'createdAt'>): Promise<number> {
-    const result = await this.db.execute({
-      sql: `INSERT INTO newsletter_items
-            (email_id, url, normalized_url, title, description, tier, topic_tag, confidence, reason,
-             readwise_status, readwise_doc_id, retry_count, next_retry_after)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [
-        item.emailId, item.url, item.normalizedUrl ?? null, item.title, item.description,
-        item.tier, item.topicTag, item.confidence, item.reason,
-        item.readwiseStatus, item.readwiseDocId, item.retryCount,
-        item.nextRetryAfter,
-      ],
-    });
-    return Number(result.lastInsertRowid);
-  }
-
-  /**
-   * Has any prior newsletter item used this normalized URL? Used to skip
-   * cross-newsletter duplicates (e.g. a Stratechery recap re-linking earlier
-   * essays, every.to bumping the same article, two newsletters citing the
-   * same external piece).
-   */
-  async hasSeenNormalizedUrl(normalizedUrl: string): Promise<boolean> {
-    const result = await this.db.execute({
-      sql: "SELECT 1 FROM newsletter_items WHERE normalized_url = ? LIMIT 1",
-      args: [normalizedUrl],
-    });
-    return result.rows.length > 0;
-  }
-
-  async getNewsletterItemsByEmail(emailId: string): Promise<NewsletterItem[]> {
-    const result = await this.db.execute({
-      sql: "SELECT * FROM newsletter_items WHERE email_id = ? ORDER BY id",
-      args: [emailId],
-    });
-    return result.rows.map((row) => this.mapNewsletterItem(row));
-  }
-
-  async getNewsletterItemsByDigest(digestId: number): Promise<NewsletterItem[]> {
-    const result = await this.db.execute({
-      sql: `SELECT ni.* FROM newsletter_items ni
-            JOIN processed_emails pe ON ni.email_id = pe.id
-            WHERE pe.digest_id = ?
-            ORDER BY ni.id`,
-      args: [digestId],
-    });
-    return result.rows.map((row) => this.mapNewsletterItem(row));
-  }
-
-  async getRetryableItems(): Promise<NewsletterItem[]> {
-    const now = new Date().toISOString();
-    const result = await this.db.execute({
-      sql: `SELECT * FROM newsletter_items
-            WHERE readwise_status = 'failed'
-            AND retry_count < 10
-            AND (next_retry_after IS NULL OR next_retry_after <= ?)
-            ORDER BY id`,
-      args: [now],
-    });
-    return result.rows.map((row) => this.mapNewsletterItem(row));
-  }
-
-  async updateNewsletterItemReadwise(
-    itemId: number,
-    status: ReadwiseStatus | null,
-    docId: string | null,
-    retryCount: number,
-    nextRetryAfter: string | null
-  ): Promise<void> {
-    await this.db.execute({
-      sql: `UPDATE newsletter_items
-            SET readwise_status = ?, readwise_doc_id = ?, retry_count = ?, next_retry_after = ?
-            WHERE id = ?`,
-      args: [status, docId, retryCount, nextRetryAfter, itemId],
-    });
-  }
-
-  async updateNewsletterItemTier(itemId: number, newTier: ItemTier): Promise<void> {
-    await this.db.execute({
-      sql: "UPDATE newsletter_items SET tier = ? WHERE id = ?",
-      args: [newTier, itemId],
-    });
-  }
-
-  async getNewsletterItem(itemId: number): Promise<NewsletterItem | null> {
-    const result = await this.db.execute({
-      sql: "SELECT * FROM newsletter_items WHERE id = ?",
-      args: [itemId],
-    });
-    if (result.rows.length === 0) return null;
-    return this.mapNewsletterItem(result.rows[0]);
-  }
-
-  private mapNewsletterItem(row: Record<string, unknown>): NewsletterItem {
-    return {
-      id: row.id as number,
-      emailId: row.email_id as string,
-      url: row.url as string,
-      normalizedUrl: (row.normalized_url as string | null) ?? null,
-      title: row.title as string | null,
-      description: row.description as string | null,
-      tier: row.tier as ItemTier,
-      topicTag: row.topic_tag as string | null,
-      confidence: row.confidence as number,
-      reason: row.reason as string | null,
-      readwiseStatus: row.readwise_status as ReadwiseStatus | null,
-      readwiseDocId: row.readwise_doc_id as string | null,
-      retryCount: row.retry_count as number,
-      nextRetryAfter: row.next_retry_after as string | null,
-      createdAt: row.created_at as string,
-    };
-  }
-
-  // ============ Tier Corrections ============
-
-  async saveTierCorrection(correction: Omit<TierCorrection, 'id' | 'createdAt'>): Promise<number> {
-    const result = await this.db.execute({
-      sql: `INSERT INTO tier_corrections (item_id, original_tier, corrected_tier)
-            VALUES (?, ?, ?)`,
-      args: [correction.itemId, correction.originalTier, correction.correctedTier],
-    });
-    return Number(result.lastInsertRowid);
-  }
-
-  async getRecentTierCorrections(limit: number = 20): Promise<(TierCorrection & { itemUrl: string; itemTitle: string | null; newsletterFrom: string })[]> {
-    const result = await this.db.execute({
-      sql: `SELECT tc.*, ni.url as item_url, ni.title as item_title, pe.from_email as newsletter_from
-            FROM tier_corrections tc
-            JOIN newsletter_items ni ON tc.item_id = ni.id
-            JOIN processed_emails pe ON ni.email_id = pe.id
-            ORDER BY tc.created_at DESC
-            LIMIT ?`,
-      args: [limit],
-    });
-    return result.rows.map((row) => ({
-      id: row.id as number,
-      itemId: row.item_id as number,
-      originalTier: row.original_tier as ItemTier,
-      correctedTier: row.corrected_tier as ItemTier,
-      createdAt: row.created_at as string,
-      itemUrl: row.item_url as string,
-      itemTitle: row.item_title as string | null,
-      newsletterFrom: row.newsletter_from as string,
-    }));
-  }
-
-  // ============ Correction Tokens ============
-
-  async createCorrectionToken(digestId: number, expiryDays: number = 7): Promise<string> {
-    const token = crypto.randomUUID();
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + expiryDays * 24 * 60 * 60 * 1000);
-    await this.db.execute({
-      sql: `INSERT INTO correction_tokens (token, digest_id, created_at, expires_at)
-            VALUES (?, ?, ?, ?)`,
-      args: [token, digestId, now.toISOString(), expiresAt.toISOString()],
-    });
-    return token;
-  }
-
-  async validateCorrectionToken(token: string): Promise<{ valid: boolean; digestId: number | null }> {
-    const result = await this.db.execute({
-      sql: "SELECT * FROM correction_tokens WHERE token = ?",
-      args: [token],
-    });
-    if (result.rows.length === 0) return { valid: false, digestId: null };
-    const row = result.rows[0];
-    const expiresAt = new Date(row.expires_at as string);
-    if (expiresAt < new Date()) return { valid: false, digestId: null };
-    return { valid: true, digestId: row.digest_id as number };
-  }
-
-  // ============ Newsletter Stats ============
-
-  // ============ Reading Feedback ============
-
-  async saveReadingFeedback(feedback: Omit<ReadingFeedback, 'id' | 'createdAt' | 'processed'>): Promise<number> {
-    const result = await this.db.execute({
-      sql: `INSERT INTO reading_feedback
-            (item_id, readwise_doc_id, signal_type, reading_progress, highlighted_text, event_timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [
-        feedback.itemId, feedback.readwiseDocId, feedback.signalType,
-        feedback.readingProgress, feedback.highlightedText, feedback.eventTimestamp,
-      ],
-    });
-    return Number(result.lastInsertRowid);
-  }
-
-  async getUnprocessedFeedback(): Promise<ReadingFeedback[]> {
-    const result = await this.db.execute(
-      "SELECT * FROM reading_feedback WHERE processed = 0 ORDER BY event_timestamp"
-    );
-    return result.rows.map((row) => ({
-      id: row.id as number,
-      itemId: row.item_id as number,
-      readwiseDocId: row.readwise_doc_id as string | null,
-      signalType: row.signal_type as FeedbackSignal,
-      readingProgress: row.reading_progress as number | null,
-      highlightedText: row.highlighted_text as string | null,
-      eventTimestamp: row.event_timestamp as string,
-      processed: Boolean(row.processed),
-      createdAt: row.created_at as string,
-    }));
-  }
-
-  async markFeedbackProcessed(feedbackId: number): Promise<void> {
-    await this.db.execute({
-      sql: "UPDATE reading_feedback SET processed = 1 WHERE id = ?",
-      args: [feedbackId],
-    });
-  }
-
-  async getItemByReadwiseDocId(docId: string): Promise<NewsletterItem | null> {
-    const result = await this.db.execute({
-      sql: "SELECT * FROM newsletter_items WHERE readwise_doc_id = ?",
-      args: [docId],
-    });
-    if (result.rows.length === 0) return null;
-    return this.mapNewsletterItem(result.rows[0]);
-  }
-
-  async getItemsForProgressCheck(): Promise<NewsletterItem[]> {
-    // Items saved to Readwise 7-30 days ago, not yet checked for reading progress
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const result = await this.db.execute({
-      sql: `SELECT ni.* FROM newsletter_items ni
-            WHERE ni.readwise_status = 'saved'
-            AND ni.readwise_doc_id IS NOT NULL
-            AND ni.created_at BETWEEN ? AND ?
-            AND ni.id NOT IN (
-              SELECT DISTINCT item_id FROM reading_feedback
-              WHERE signal_type = 'progress_update'
-            )
-            ORDER BY ni.created_at DESC
-            LIMIT 50`,
-      args: [thirtyDaysAgo, sevenDaysAgo],
-    });
-    return result.rows.map((row) => this.mapNewsletterItem(row));
-  }
-
-  async getFeedbackSummary(sinceDays: number = 30): Promise<{
-    totalHighlights: number;
-    totalFinished: number;
-    highlightsByTier: Record<string, number>;
-    highlightsByTopic: Record<string, number>;
-    unreadMustReads: number;
-    readNiceToHaves: number;
-  }> {
-    const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
-
-    const highlights = await this.db.execute({
-      sql: `SELECT ni.tier, ni.topic_tag, COUNT(*) as count
-            FROM reading_feedback rf
-            JOIN newsletter_items ni ON rf.item_id = ni.id
-            WHERE rf.signal_type = 'highlight_created'
-            AND rf.event_timestamp >= ?
-            GROUP BY ni.tier, ni.topic_tag`,
-      args: [since],
-    });
-
-    const finished = await this.db.execute({
-      sql: `SELECT COUNT(*) as count FROM reading_feedback
-            WHERE signal_type = 'document_finished' AND event_timestamp >= ?`,
-      args: [since],
-    });
-
-    // Items saved as must-read but never opened after 14 days
-    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-    const unreadMustReads = await this.db.execute({
-      sql: `SELECT COUNT(*) as count FROM newsletter_items ni
-            WHERE ni.tier = 'must-read'
-            AND ni.readwise_status = 'saved'
-            AND ni.created_at <= ?
-            AND ni.id NOT IN (
-              SELECT DISTINCT item_id FROM reading_feedback
-              WHERE signal_type IN ('highlight_created', 'document_finished', 'progress_update')
-            )`,
-      args: [fourteenDaysAgo],
-    });
-
-    // Items saved as nice-to-have that got read/highlighted
-    const readNiceToHaves = await this.db.execute({
-      sql: `SELECT COUNT(DISTINCT ni.id) as count FROM newsletter_items ni
-            JOIN reading_feedback rf ON rf.item_id = ni.id
-            WHERE ni.tier = 'nice-to-have'
-            AND rf.signal_type IN ('highlight_created', 'document_finished')
-            AND rf.event_timestamp >= ?`,
-      args: [since],
-    });
-
-    let totalHighlights = 0;
-    const highlightsByTier: Record<string, number> = {};
-    const highlightsByTopic: Record<string, number> = {};
-    for (const row of highlights.rows) {
-      const count = row.count as number;
-      const tier = row.tier as string;
-      const topic = row.topic_tag as string;
-      totalHighlights += count;
-      highlightsByTier[tier] = (highlightsByTier[tier] || 0) + count;
-      highlightsByTopic[topic] = (highlightsByTopic[topic] || 0) + count;
-    }
-
-    return {
-      totalHighlights,
-      totalFinished: finished.rows[0].count as number,
-      highlightsByTier,
-      highlightsByTopic,
-      unreadMustReads: unreadMustReads.rows[0].count as number,
-      readNiceToHaves: readNiceToHaves.rows[0].count as number,
-    };
-  }
-
-  async getNewsletterStats(digestId: number): Promise<{
-    newslettersProcessed: number;
-    itemsExtracted: number;
-    itemsByTier: Record<string, number>;
-    itemsSaved: number;
-    itemsFailed: number;
-    itemsAbandoned: number;
-  }> {
-    const newsletters = await this.db.execute({
-      sql: "SELECT COUNT(*) as count FROM processed_emails WHERE digest_id = ? AND is_newsletter = 1",
-      args: [digestId],
-    });
-
-    const items = await this.db.execute({
-      sql: `SELECT ni.tier, ni.readwise_status, COUNT(*) as count
-            FROM newsletter_items ni
-            JOIN processed_emails pe ON ni.email_id = pe.id
-            WHERE pe.digest_id = ?
-            GROUP BY ni.tier, ni.readwise_status`,
-      args: [digestId],
-    });
-
-    let itemsExtracted = 0;
-    let itemsSaved = 0;
-    let itemsFailed = 0;
-    let itemsAbandoned = 0;
-    const itemsByTier: Record<string, number> = {};
-
-    for (const row of items.rows) {
-      const count = row.count as number;
-      const tier = row.tier as string;
-      const status = row.readwise_status as string | null;
-      itemsExtracted += count;
-      itemsByTier[tier] = (itemsByTier[tier] || 0) + count;
-      if (status === "saved") itemsSaved += count;
-      if (status === "failed") itemsFailed += count;
-      if (status === "abandoned") itemsAbandoned += count;
-    }
-
-    return {
-      newslettersProcessed: newsletters.rows[0].count as number,
-      itemsExtracted,
-      itemsByTier,
-      itemsSaved,
-      itemsFailed,
-      itemsAbandoned,
-    };
   }
 
 }
