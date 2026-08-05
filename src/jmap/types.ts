@@ -56,6 +56,7 @@ export interface Email {
   sentAt: string | null;
   hasAttachment: boolean;
   preview: string;
+  "header:List-Id:asText"?: string | null;
   bodyValues?: Record<string, EmailBodyValue>;
   textBody?: EmailBodyPart[];
   htmlBody?: EmailBodyPart[];

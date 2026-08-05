@@ -105,6 +105,30 @@ export async function initializeDatabase(client: Client): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_corrections_classification ON corrections(corrected_classification);
 
+    -- Behavioral event log (append-only). email_id is NULL for digest-level events.
+    CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email_id TEXT,
+      type TEXT NOT NULL,
+      at TEXT NOT NULL,
+      source TEXT NOT NULL,
+      detail TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_events_email ON events(email_id);
+    CREATE INDEX IF NOT EXISTS idx_events_type_at ON events(type, at);
+
+    -- Last-known JMAP state per email, used to diff Email/changes into events.
+    -- Infrastructure state, not data: safe to rebuild from scratch.
+    CREATE TABLE IF NOT EXISTS email_state (
+      id TEXT PRIMARY KEY,
+      mailbox_ids TEXT NOT NULL,
+      seen INTEGER NOT NULL DEFAULT 0,
+      answered INTEGER NOT NULL DEFAULT 0,
+      flagged INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
   `);
 
   // Migration: Add content_format column if it doesn't exist (for existing databases)
@@ -157,6 +181,23 @@ export async function initializeDatabase(client: Client): Promise<void> {
     );
   } catch {
     // Column already exists, ignore error
+  }
+
+  // Migration: Add list_id column to processed_emails
+  try {
+    await client.execute(
+      "ALTER TABLE processed_emails ADD COLUMN list_id TEXT"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  try {
+    await client.execute(
+      "CREATE INDEX IF NOT EXISTS idx_processed_emails_list ON processed_emails(list_id)"
+    );
+  } catch {
+    // Index may fail if column doesn't exist yet
   }
 
   // Create indexes for new columns (after migrations)

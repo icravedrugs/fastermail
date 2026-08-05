@@ -25,6 +25,35 @@ export interface ProcessedEmail {
   actionTaken: string | null;
   contentFormat: ContentFormat;
   digestId: number | null;
+  listId: string | null;
+}
+
+export type ActivityEventType =
+  | "seen"
+  | "unseen"
+  | "moved"
+  | "destroyed"
+  | "answered"
+  | "flagged"
+  | "digest_included"
+  | "digest_click";
+
+export type ActivityEventSource = "user" | "fastermail";
+
+export interface ActivityEvent {
+  emailId: string | null;
+  type: ActivityEventType;
+  at?: string;
+  source: ActivityEventSource;
+  detail?: Record<string, unknown>;
+}
+
+export interface EmailStateSnapshot {
+  id: string;
+  mailboxIds: string[];
+  seen: boolean;
+  answered: boolean;
+  flagged: boolean;
 }
 
 export interface SenderProfile {
@@ -77,6 +106,27 @@ export class Store {
 
   // ============ Processed Emails ============
 
+  private mapProcessedEmail(row: Record<string, unknown>): ProcessedEmail {
+    return {
+      id: row.id as string,
+      threadId: row.thread_id as string | null,
+      fromEmail: row.from_email as string,
+      fromName: row.from_name as string | null,
+      subject: row.subject as string | null,
+      receivedAt: row.received_at as string,
+      processedAt: row.processed_at as string,
+      classification: row.classification as string,
+      confidence: row.confidence as number,
+      reasoning: row.reasoning as string | null,
+      contentSummary: row.content_summary as string | null,
+      labelsApplied: row.labels_applied as string | null,
+      actionTaken: row.action_taken as string | null,
+      contentFormat: (row.content_format as ContentFormat) || "standard",
+      digestId: row.digest_id as number | null,
+      listId: (row.list_id as string | null) ?? null,
+    };
+  }
+
   async isEmailProcessed(emailId: string): Promise<boolean> {
     const result = await this.db.execute({
       sql: "SELECT 1 FROM processed_emails WHERE id = ?",
@@ -89,8 +139,8 @@ export class Store {
     await this.db.execute({
       sql: `INSERT OR REPLACE INTO processed_emails
             (id, thread_id, from_email, from_name, subject, received_at,
-             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id, list_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         email.id,
         email.threadId,
@@ -107,6 +157,7 @@ export class Store {
         email.actionTaken,
         email.contentFormat,
         email.digestId,
+        email.listId,
       ],
     });
   }
@@ -119,23 +170,7 @@ export class Store {
       args: [since],
     });
 
-    return result.rows.map((row) => ({
-      id: row.id as string,
-      threadId: row.thread_id as string | null,
-      fromEmail: row.from_email as string,
-      fromName: row.from_name as string | null,
-      subject: row.subject as string | null,
-      receivedAt: row.received_at as string,
-      processedAt: row.processed_at as string,
-      classification: row.classification as string,
-      confidence: row.confidence as number,
-      reasoning: row.reasoning as string | null,
-      contentSummary: row.content_summary as string | null,
-      labelsApplied: row.labels_applied as string | null,
-      actionTaken: row.action_taken as string | null,
-      contentFormat: (row.content_format as ContentFormat) || "standard",
-      digestId: row.digest_id as number | null,
-    }));
+    return result.rows.map((row) => this.mapProcessedEmail(row));
   }
 
   async getProcessedEmailsByClassification(
@@ -150,23 +185,7 @@ export class Store {
       args: [classification, limit],
     });
 
-    return result.rows.map((row) => ({
-      id: row.id as string,
-      threadId: row.thread_id as string | null,
-      fromEmail: row.from_email as string,
-      fromName: row.from_name as string | null,
-      subject: row.subject as string | null,
-      receivedAt: row.received_at as string,
-      processedAt: row.processed_at as string,
-      classification: row.classification as string,
-      confidence: row.confidence as number,
-      reasoning: row.reasoning as string | null,
-      contentSummary: row.content_summary as string | null,
-      labelsApplied: row.labels_applied as string | null,
-      actionTaken: row.action_taken as string | null,
-      contentFormat: (row.content_format as ContentFormat) || "standard",
-      digestId: row.digest_id as number | null,
-    }));
+    return result.rows.map((row) => this.mapProcessedEmail(row));
   }
 
   // ============ Sender Profiles ============
@@ -411,23 +430,7 @@ export class Store {
       args: [digestId],
     });
 
-    return result.rows.map((row) => ({
-      id: row.id as string,
-      threadId: row.thread_id as string | null,
-      fromEmail: row.from_email as string,
-      fromName: row.from_name as string | null,
-      subject: row.subject as string | null,
-      receivedAt: row.received_at as string,
-      processedAt: row.processed_at as string,
-      classification: row.classification as string,
-      confidence: row.confidence as number,
-      reasoning: row.reasoning as string | null,
-      contentSummary: row.content_summary as string | null,
-      labelsApplied: row.labels_applied as string | null,
-      actionTaken: row.action_taken as string | null,
-      contentFormat: (row.content_format as ContentFormat) || "standard",
-      digestId: row.digest_id as number | null,
-    }));
+    return result.rows.map((row) => this.mapProcessedEmail(row));
   }
 
   async markDigestCleaned(digestId: number): Promise<void> {
@@ -565,24 +568,7 @@ export class Store {
 
     if (result.rows.length === 0) return null;
 
-    const row = result.rows[0];
-    return {
-      id: row.id as string,
-      threadId: row.thread_id as string | null,
-      fromEmail: row.from_email as string,
-      fromName: row.from_name as string | null,
-      subject: row.subject as string | null,
-      receivedAt: row.received_at as string,
-      processedAt: row.processed_at as string,
-      classification: row.classification as string,
-      confidence: row.confidence as number,
-      reasoning: row.reasoning as string | null,
-      contentSummary: row.content_summary as string | null,
-      labelsApplied: row.labels_applied as string | null,
-      actionTaken: row.action_taken as string | null,
-      contentFormat: (row.content_format as ContentFormat) || "standard",
-      digestId: row.digest_id as number | null,
-    };
+    return this.mapProcessedEmail(result.rows[0]);
   }
 
   async updateEmailClassification(
@@ -594,6 +580,74 @@ export class Store {
             SET classification = ?, processed_at = ?
             WHERE id = ?`,
       args: [newClassification, new Date().toISOString(), emailId],
+    });
+  }
+
+  // ============ Activity Events ============
+
+  async recordEvent(event: ActivityEvent): Promise<void> {
+    await this.db.execute({
+      sql: `INSERT INTO events (email_id, type, at, source, detail)
+            VALUES (?, ?, ?, ?, ?)`,
+      args: [
+        event.emailId,
+        event.type,
+        event.at ?? new Date().toISOString(),
+        event.source,
+        event.detail ? JSON.stringify(event.detail) : null,
+      ],
+    });
+  }
+
+  // ============ Email State Snapshots ============
+
+  async getEmailStateSnapshots(
+    ids: string[]
+  ): Promise<Map<string, EmailStateSnapshot>> {
+    const snapshots = new Map<string, EmailStateSnapshot>();
+
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const placeholders = chunk.map(() => "?").join(",");
+      const result = await this.db.execute({
+        sql: `SELECT * FROM email_state WHERE id IN (${placeholders})`,
+        args: chunk,
+      });
+
+      for (const row of result.rows) {
+        snapshots.set(row.id as string, {
+          id: row.id as string,
+          mailboxIds: JSON.parse(row.mailbox_ids as string),
+          seen: Boolean(row.seen),
+          answered: Boolean(row.answered),
+          flagged: Boolean(row.flagged),
+        });
+      }
+    }
+
+    return snapshots;
+  }
+
+  async upsertEmailStateSnapshot(snapshot: EmailStateSnapshot): Promise<void> {
+    await this.db.execute({
+      sql: `INSERT OR REPLACE INTO email_state
+            (id, mailbox_ids, seen, answered, flagged, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)`,
+      args: [
+        snapshot.id,
+        JSON.stringify(snapshot.mailboxIds),
+        snapshot.seen ? 1 : 0,
+        snapshot.answered ? 1 : 0,
+        snapshot.flagged ? 1 : 0,
+        new Date().toISOString(),
+      ],
+    });
+  }
+
+  async deleteEmailStateSnapshot(id: string): Promise<void> {
+    await this.db.execute({
+      sql: "DELETE FROM email_state WHERE id = ?",
+      args: [id],
     });
   }
 

@@ -15,10 +15,21 @@ export class JMAPClient {
   private accountId: string | null = null;
   private emailState: string | null = null;
 
+  // Called with email ids just before this client mutates them, so the
+  // activity watcher can attribute the resulting changes to Fastermail
+  // itself rather than to the user.
+  onEmailMutation: ((ids: string[]) => void) | null = null;
+
   constructor(
     private readonly sessionUrl: string,
     private readonly token: string
   ) {}
+
+  private notifyMutation(ids: string[]): void {
+    if (this.onEmailMutation && ids.length > 0) {
+      this.onEmailMutation(ids);
+    }
+  }
 
   private async fetch<T>(
     url: string,
@@ -208,6 +219,7 @@ export class JMAPClient {
       "sentAt",
       "hasAttachment",
       "preview",
+      "header:List-Id:asText",
     ];
 
     const response = await this.request([
@@ -323,12 +335,72 @@ export class JMAPClient {
     return changes;
   }
 
+  // ============ Push (EventSource) ============
+
+  /**
+   * Stream server push notifications for Email state changes over SSE.
+   * Calls onChange for every state event; resolves when the server closes
+   * the stream, rejects on connection errors or abort. The caller owns
+   * reconnection.
+   */
+  async streamEmailChanges(
+    onChange: () => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    if (!this.session) {
+      throw new Error("Not connected. Call connect() first.");
+    }
+
+    // eventSourceUrl is a URI template per RFC 8620 section 3.7
+    const url = this.session.eventSourceUrl
+      .replace("{types}", "Email")
+      .replace("{closeafter}", "no")
+      .replace("{ping}", "60");
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        Accept: "text/event-stream",
+      },
+      signal,
+    });
+
+    if (!response.ok || !response.body) {
+      throw new Error(`EventSource connection failed: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary;
+      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+
+        const isStateEvent = rawEvent
+          .split("\n")
+          .some((line) => line.replace(/\s/g, "").startsWith("event:state"));
+        if (isStateEvent) {
+          onChange();
+        }
+      }
+    }
+  }
+
   // ============ Email Modification Operations ============
 
   async setEmailKeywords(
     emailId: string,
     keywords: Record<string, boolean>
   ): Promise<void> {
+    this.notifyMutation([emailId]);
     const response = await this.request([
       [
         "Email/set",
@@ -356,6 +428,7 @@ export class JMAPClient {
   }
 
   async addEmailKeyword(emailId: string, keyword: string): Promise<void> {
+    this.notifyMutation([emailId]);
     const response = await this.request([
       [
         "Email/set",
@@ -378,6 +451,7 @@ export class JMAPClient {
   }
 
   async removeEmailKeyword(emailId: string, keyword: string): Promise<void> {
+    this.notifyMutation([emailId]);
     const response = await this.request([
       [
         "Email/set",
@@ -405,6 +479,7 @@ export class JMAPClient {
       throw new Error(`Email not found: ${emailId}`);
     }
 
+    this.notifyMutation([emailId]);
     const response = await this.request([
       [
         "Email/set",
@@ -434,6 +509,7 @@ export class JMAPClient {
 
   async addEmailToMailbox(emailId: string, mailboxId: string): Promise<void> {
     // Add email to mailbox without removing from other mailboxes (for labels)
+    this.notifyMutation([emailId]);
     const response = await this.request([
       [
         "Email/set",
@@ -456,6 +532,7 @@ export class JMAPClient {
   }
 
   async removeEmailFromMailbox(emailId: string, mailboxId: string): Promise<void> {
+    this.notifyMutation([emailId]);
     const response = await this.request([
       [
         "Email/set",
@@ -494,6 +571,7 @@ export class JMAPClient {
       return { updated: [], notUpdated: {} };
     }
 
+    this.notifyMutation(Object.keys(updates));
     const response = await this.request([
       [
         "Email/set",

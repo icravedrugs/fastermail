@@ -9,6 +9,7 @@ An AI-powered email triage agent for Fastmail. Automatically classifies incoming
 - **Sender Profiling**: Learns your communication patterns to improve classification
 - **Email Digests**: Sends scheduled summaries of low-priority emails with one-click cleanup
 - **JMAP Integration**: Native Fastmail API support via JMAP protocol
+- **Behavioral Event Log**: Watches the whole account (via JMAP push + changes sync) and records an append-only `events` table — reads, moves, deletes, replies, flags, and digest link clicks — as training data for adaptive triage
 
 ## How It Works
 

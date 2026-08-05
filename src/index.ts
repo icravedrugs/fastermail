@@ -8,6 +8,7 @@ import { ProfileManager } from "./sender/index.js";
 import { TriageEngine, LabelManager } from "./triage/index.js";
 import { DigestScheduler } from "./digest/index.js";
 import { runCleanup } from "./cleanup/index.js";
+import { ActivityWatcher, SelfActionRegistry } from "./events/index.js";
 
 function validateSettings(): void {
   const required = [
@@ -72,6 +73,11 @@ async function main(): Promise<void> {
     process.env.JMAP_TOKEN!
   );
 
+  // Tag our own JMAP mutations so the activity watcher can tell them apart
+  // from the user's actions.
+  const selfActions = new SelfActionRegistry();
+  jmap.onEmailMutation = (ids) => selfActions.record(ids);
+
   try {
     await jmap.connect();
     console.log("\nJMAP connection established");
@@ -131,6 +137,14 @@ async function main(): Promise<void> {
   // Start digest scheduler
   digestScheduler.start();
 
+  // Start activity watcher (account-wide behavioral event capture)
+  const activityWatcher = new ActivityWatcher(jmap, store, selfActions, pollInterval);
+  try {
+    await activityWatcher.start();
+  } catch (error) {
+    console.error("Activity watcher failed to start:", error);
+  }
+
   // Start HTTP server for cleanup endpoint
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url!, `http://${req.headers.host}`);
@@ -154,6 +168,21 @@ async function main(): Promise<void> {
       }
 
       try {
+        // Record the cleanup click as a digest-level engagement event
+        try {
+          const digest = await store.getDigestByToken(token);
+          if (digest) {
+            await store.recordEvent({
+              emailId: null,
+              type: "digest_click",
+              source: "user",
+              detail: { action: "cleanup", digest_id: digest.id },
+            });
+          }
+        } catch (err) {
+          console.error("Failed to record cleanup click event:", err);
+        }
+
         const result = await runCleanup(token, jmap, store, labelManager);
 
         if (!result.success) {
@@ -236,6 +265,13 @@ async function main(): Promise<void> {
       }
 
       try {
+        await store.recordEvent({
+          emailId,
+          type: "digest_click",
+          source: "user",
+          detail: { action: op },
+        });
+
         const role = op === "delete" ? "trash" : "inbox";
         const mailbox = await jmap.findMailboxByRole(role);
         if (!mailbox) {
@@ -270,6 +306,36 @@ async function main(): Promise<void> {
           </html>
         `);
       }
+    } else if (url.pathname === "/r" && req.method === "GET") {
+      // Click-tracking redirect for digest links
+      const emailId = url.searchParams.get("id");
+      const action = url.searchParams.get("a");
+      const target = url.searchParams.get("u");
+
+      if (
+        !emailId ||
+        !target ||
+        !/^https?:\/\//i.test(target) ||
+        (action !== "open-link" && action !== "open-thread")
+      ) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("Invalid redirect request");
+        return;
+      }
+
+      try {
+        await store.recordEvent({
+          emailId,
+          type: "digest_click",
+          source: "user",
+          detail: { action, url: target },
+        });
+      } catch (err) {
+        console.error("Failed to record digest click event:", err);
+      }
+
+      res.writeHead(302, { Location: target });
+      res.end();
     } else if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok" }));
@@ -297,6 +363,7 @@ async function main(): Promise<void> {
     console.log("\nShutting down...");
     triageEngine.stop();
     digestScheduler.stop();
+    activityWatcher.stop();
     server.close();
     process.exit(0);
   };

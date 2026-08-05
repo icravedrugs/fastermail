@@ -20,6 +20,15 @@ export interface TriageEngineConfig {
   userEmail: string;
 }
 
+// List-Id headers look like `Friendly Name <list.id.domain>`; the part in
+// angle brackets is the stable list identity.
+function normalizeListId(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const match = raw.match(/<([^>]+)>/);
+  const listId = (match ? match[1] : raw).trim();
+  return listId || null;
+}
+
 export interface TriageResult {
   emailId: string;
   classification: Classification;
@@ -313,6 +322,7 @@ export class TriageEngine {
       actionTaken,
       contentFormat,
       digestId: pendingDigest.id,
+      listId: normalizeListId(email["header:List-Id:asText"]),
     };
 
     await this.store.saveProcessedEmail(processed);
