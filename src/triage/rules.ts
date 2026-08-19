@@ -1,154 +1,13 @@
-import type { Email } from "../jmap/index.js";
-import type { ClassifierConfig, Classification, CorrectionExample } from "./classifier.js";
+import crypto from "crypto";
+import type { ClassifierConfig, CorrectionExample } from "./classifier.js";
 import type { Store, Correction } from "../db/index.js";
 
-export interface Rule {
-  id: string;
-  name: string;
-  condition: RuleCondition;
-  action: RuleAction;
-  priority: number;
-}
-
-export type RuleCondition =
-  | { type: "from"; pattern: string }
-  | { type: "domain"; domain: string }
-  | { type: "subject"; pattern: string }
-  | { type: "has-attachment"; value: boolean }
-  | { type: "and"; conditions: RuleCondition[] }
-  | { type: "or"; conditions: RuleCondition[] };
-
-export type RuleAction =
-  | { type: "classify"; classification: Classification }
-  | { type: "label"; label: string }
-  | { type: "skip" };
-
-export function evaluateCondition(
-  condition: RuleCondition,
-  email: Email
-): boolean {
-  switch (condition.type) {
-    case "from": {
-      const from = email.from?.[0]?.email?.toLowerCase() || "";
-      return from.includes(condition.pattern.toLowerCase());
-    }
-    case "domain": {
-      const from = email.from?.[0]?.email?.toLowerCase() || "";
-      const domain = from.split("@")[1] || "";
-      return domain === condition.domain.toLowerCase();
-    }
-    case "subject": {
-      const subject = email.subject?.toLowerCase() || "";
-      return subject.includes(condition.pattern.toLowerCase());
-    }
-    case "has-attachment": {
-      return email.hasAttachment === condition.value;
-    }
-    case "and": {
-      return condition.conditions.every((c) => evaluateCondition(c, email));
-    }
-    case "or": {
-      return condition.conditions.some((c) => evaluateCondition(c, email));
-    }
-  }
-}
-
-export function parseCustomRules(rules: string[]): Rule[] {
-  const parsedRules: Rule[] = [];
-
-  for (let i = 0; i < rules.length; i++) {
-    const rule = rules[i].toLowerCase().trim();
-    const id = `custom-${i}`;
-
-    // Parse common patterns
-    // "emails from X are important"
-    const fromImportant = rule.match(
-      /emails?\s+from\s+(\S+)\s+(?:are|is)\s+(important|low-priority|fyi)/
-    );
-    if (fromImportant) {
-      parsedRules.push({
-        id,
-        name: rule,
-        condition: { type: "from", pattern: fromImportant[1] },
-        action: {
-          type: "classify",
-          classification: fromImportant[2] as Classification,
-        },
-        priority: 100,
-      });
-      continue;
-    }
-
-    // "newsletters are low-priority"
-    const subjectClass = rule.match(
-      /(\w+)\s+(?:are|is)\s+(important|low-priority|fyi|needs-reply)/
-    );
-    if (subjectClass) {
-      parsedRules.push({
-        id,
-        name: rule,
-        condition: { type: "subject", pattern: subjectClass[1] },
-        action: {
-          type: "classify",
-          classification: subjectClass[2] as Classification,
-        },
-        priority: 50,
-      });
-      continue;
-    }
-
-    // "archive emails from domain.com"
-    const archiveDomain = rule.match(
-      /archive\s+emails?\s+from\s+(\S+)/
-    );
-    if (archiveDomain) {
-      parsedRules.push({
-        id,
-        name: rule,
-        condition: { type: "domain", domain: archiveDomain[1] },
-        action: { type: "classify", classification: "low-priority" },
-        priority: 75,
-      });
-      continue;
-    }
-
-    // If we couldn't parse, store as-is for LLM to interpret
-    console.log(`Rule not parsed, will be passed to LLM: "${rule}"`);
-  }
-
-  return parsedRules.sort((a, b) => b.priority - a.priority);
-}
-
-export function applyRules(
-  email: Email,
-  rules: Rule[]
-): { classification?: Classification; labels: string[] } | null {
-  const labels: string[] = [];
-  let classification: Classification | undefined;
-
-  for (const rule of rules) {
-    if (evaluateCondition(rule.condition, email)) {
-      switch (rule.action.type) {
-        case "classify":
-          if (!classification) {
-            classification = rule.action.classification;
-          }
-          break;
-        case "label":
-          labels.push(rule.action.label);
-          break;
-        case "skip":
-          return null; // Skip this email entirely
-      }
-    }
-  }
-
-  if (classification || labels.length > 0) {
-    return { classification, labels };
-  }
-
-  return null;
-}
+// NOTE: this file once held a deterministic rule engine (Rule types,
+// evaluateCondition, parseCustomRules, applyRules) that was exported but never
+// called — every "rule" actually lives as English inside the classifier
+// prompt. The dead engine was removed in the window-2 batch; deterministic
+// pre-classification now lives in pretriage.ts. customRules strings still
+// flow into the prompt via ClassifierConfig below.
 
 export async function buildConfigFromStore(store: Store): Promise<ClassifierConfig> {
   // Get basic config
@@ -171,6 +30,20 @@ export async function buildConfigFromStore(store: Store): Promise<ClassifierConf
     customRules,
     corrections,
   };
+}
+
+/**
+ * Fingerprint of the assembled classifier config, stored on every
+ * processed_emails row. The config mutates whenever a correction lands
+ * (corrections are spliced into the prompt), so without this no two analysis
+ * windows measure the same system.
+ */
+export function computeConfigHash(config: ClassifierConfig): string {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(config))
+    .digest("hex")
+    .slice(0, 12);
 }
 
 /**

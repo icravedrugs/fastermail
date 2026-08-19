@@ -4,11 +4,13 @@ import type { ProfileManager } from "../sender/index.js";
 import {
   EmailClassifier,
   type Classification,
+  type ClassificationResult,
   type ClassifierConfig,
   type ContentFormat,
 } from "./classifier.js";
 import { LabelManager } from "./labels.js";
-import { buildConfigFromStore } from "./rules.js";
+import { buildConfigFromStore, computeConfigHash } from "./rules.js";
+import { detectOtp, PROMOTED_SENDERS, GITHUB_SENDER, OTP_TTL_MS } from "./pretriage.js";
 import { CorrectionProcessor } from "./corrections.js";
 
 export interface TriageEngineConfig {
@@ -29,13 +31,20 @@ function normalizeListId(raw: string | null | undefined): string | null {
   return listId || null;
 }
 
+export type TriageAction =
+  | "labeled"
+  | "archived"
+  | "kept"
+  | "promoted"
+  | "otp-bypass";
+
 export interface TriageResult {
   emailId: string;
   classification: Classification;
   confidence: number;
   reasoning: string;
   labelsApplied: string[];
-  actionTaken: "labeled" | "archived" | "kept";
+  actionTaken: TriageAction;
 }
 
 export class TriageEngine {
@@ -126,6 +135,8 @@ export class TriageEngine {
         console.log(`Applied ${correctionsProcessed} user corrections`);
       }
 
+      await this.expireOtps();
+
       return await this.processNewEmails();
     } catch (error) {
       console.error("Poll error:", error);
@@ -166,31 +177,46 @@ export class TriageEngine {
     // Fetch full email data
     const emails = await this.jmap.getEmails(idsToProcess);
 
-    // Filter out emails from self (e.g., digest emails) and those already labeled
-    const emailsToProcess = emails.filter((email) => {
+    // Partition out emails from self (e.g., digest emails) and those already
+    // labeled. Filtered emails are recorded as classification='skipped' —
+    // a real classification would be fabricated data, and no row at all would
+    // re-fetch them on every poll (isEmailProcessed is the only gate).
+    const emailsToProcess: Email[] = [];
+    for (const email of emails) {
       const fromEmail = email.from?.[0]?.email?.toLowerCase();
       const isFromSelf = fromEmail === this.config.userEmail.toLowerCase();
       const alreadyLabeled = this.labelManager.hasAnyClassificationMailbox(email.mailboxIds);
-      return !isFromSelf && !alreadyLabeled;
-    });
+
+      if (isFromSelf || alreadyLabeled) {
+        await this.markAsProcessed(email, {
+          classification: "skipped",
+          confidence: 0,
+          reasoning: isFromSelf ? "Skipped: from self" : "Skipped: already labeled",
+          contentSummary: "",
+          actionTaken: "skipped",
+          digestId: null,
+        });
+      } else {
+        emailsToProcess.push(email);
+      }
+    }
 
     if (emailsToProcess.length === 0) {
-      // Mark as processed even if we skipped them
-      for (const email of emails) {
-        await this.markAsProcessed(email, "fyi", 1, "Already labeled", "", "labeled");
-      }
       return [];
     }
 
-    // Get classifier config
+    // Get classifier config and fingerprint it: the config mutates whenever a
+    // correction lands, and the hash is what lets analysis windows tell which
+    // policy classified which rows.
     const classifierConfig = await buildConfigFromStore(this.store);
+    const configHash = computeConfigHash(classifierConfig);
 
     // Process each email
     const results: TriageResult[] = [];
 
     for (const email of emailsToProcess) {
       try {
-        const result = await this.processEmail(email, classifierConfig);
+        const result = await this.processEmail(email, classifierConfig, configHash);
         results.push(result);
       } catch (error) {
         console.error(`Failed to process email ${email.id}:`, error);
@@ -203,9 +229,39 @@ export class TriageEngine {
 
   private async processEmail(
     email: Email,
-    config: ClassifierConfig
+    config: ClassifierConfig,
+    configHash: string
   ): Promise<TriageResult> {
-    const fromEmail = email.from?.[0]?.email;
+    const fromEmail = email.from?.[0]?.email?.toLowerCase();
+
+    // Deterministic pre-triage: one-time codes bypass everything. They stay
+    // in the inbox untouched (no label, no flag, no digest) and are trashed
+    // by expireOtps() once stale. Must run before sender promotion — some
+    // promoted senders also send sign-in codes (see pretriage.ts). GitHub is
+    // exempt: PR subjects like "Verify code signing" are never OTPs.
+    const otp = fromEmail === GITHUB_SENDER ? null : detectOtp(email);
+    if (otp) {
+      await this.markAsProcessed(email, {
+        classification: "important",
+        confidence: 1,
+        reasoning: "One-time code (deterministic pre-triage)",
+        contentSummary: otp.code ? `OTP code: ${otp.code}` : "One-time code",
+        actionTaken: "otp-bypass",
+        contentFormat: "transactional",
+        digestId: null,
+        configHash,
+      });
+
+      console.log(`  [otp-bypass] ${email.subject?.slice(0, 50) || "(no subject)"}`);
+      return {
+        emailId: email.id,
+        classification: "important",
+        confidence: 1,
+        reasoning: "One-time code (deterministic pre-triage)",
+        labelsApplied: [],
+        actionTaken: "otp-bypass",
+      };
+    }
 
     // Get sender profile
     let senderProfile = null;
@@ -216,12 +272,31 @@ export class TriageEngine {
       await this.profileManager.recordIncomingEmail(fromEmail);
     }
 
-    // Classify
-    const classification = await this.classifier.classify(
-      email,
-      senderProfile,
-      config
-    );
+    // GitHub PR threads are classified once: later notifications inherit the
+    // thread's verdict instead of drawing a fresh (and, per window 1, usually
+    // contradictory) one per message. Also saves the classifier call.
+    // Inherited rows carry the ORIGIN row's config hash — the verdict was
+    // produced by that policy, not the one running this poll.
+    let classification: ClassificationResult | null = null;
+    let rowConfigHash: string | null = configHash;
+    if (fromEmail === GITHUB_SENDER && email.threadId) {
+      const inherited = await this.store.getLatestThreadClassification(email.threadId);
+      if (inherited) {
+        classification = {
+          classification: inherited.classification as Classification,
+          confidence: inherited.confidence,
+          reasoning: "Thread continuation (classification inherited)",
+          contentSummary: email.preview ? email.preview.slice(0, 160) : "",
+          suggestedLabels: [],
+          contentFormat: inherited.contentFormat,
+        };
+        rowConfigHash = inherited.configHash;
+      }
+    }
+
+    if (!classification) {
+      classification = await this.classifier.classify(email, senderProfile, config);
+    }
 
     // Apply labels
     const labelsApplied: string[] = [classification.classification];
@@ -230,9 +305,16 @@ export class TriageEngine {
       classification.classification
     );
 
+    // Window-1-verified promotion: allowlisted senders keep their emails in
+    // the inbox regardless of classification. Routing only — the classifier's
+    // verdict is stored untouched, and the email keeps its digest row (marked
+    // as already in the inbox) so the rescue/delete signal survives.
+    const promoted = fromEmail !== undefined && PROMOTED_SENDERS.has(fromEmail);
+
     // Remove from inbox only for low-priority and fyi emails
     // Important and needs-reply emails stay in inbox for visibility
     if (this.inboxId &&
+        !promoted &&
         classification.classification !== "important" &&
         classification.classification !== "needs-reply") {
       await this.jmap.removeEmailFromMailbox(email.id, this.inboxId);
@@ -253,9 +335,9 @@ export class TriageEngine {
     }
 
     // Determine action
-    let actionTaken: "labeled" | "archived" | "kept" = "labeled";
+    let actionTaken: TriageAction = promoted ? "promoted" : "labeled";
 
-    if (this.config.mode === "triage") {
+    if (this.config.mode === "triage" && !promoted) {
       // In triage mode, archive low-priority emails
       if (classification.classification === "low-priority" && this.archiveId) {
         await this.jmap.archiveEmail(email.id);
@@ -266,16 +348,16 @@ export class TriageEngine {
     }
 
     // Save to database
-    await this.markAsProcessed(
-      email,
-      classification.classification,
-      classification.confidence,
-      classification.reasoning,
-      classification.contentSummary,
+    await this.markAsProcessed(email, {
+      classification: classification.classification,
+      confidence: classification.confidence,
+      reasoning: classification.reasoning,
+      contentSummary: classification.contentSummary,
       actionTaken,
-      labelsApplied.join(","),
-      classification.contentFormat
-    );
+      labelsApplied: labelsApplied.join(","),
+      contentFormat: classification.contentFormat,
+      configHash: rowConfigHash,
+    });
 
     // Log
     const subject = email.subject?.slice(0, 50) || "(no subject)";
@@ -295,16 +377,26 @@ export class TriageEngine {
 
   private async markAsProcessed(
     email: Email,
-    classification: Classification,
-    confidence: number,
-    reasoning: string,
-    contentSummary: string,
-    actionTaken: string,
-    labelsApplied?: string,
-    contentFormat: ContentFormat = "standard"
+    fields: {
+      classification: string;
+      confidence: number;
+      reasoning: string;
+      contentSummary: string;
+      actionTaken: string;
+      labelsApplied?: string;
+      contentFormat?: ContentFormat;
+      // undefined = attach to the pending digest; null = never digest
+      digestId?: number | null;
+      configHash?: string | null;
+    }
   ): Promise<void> {
-    // Get the current pending digest to associate this email with
-    const pendingDigest = await this.store.getPendingDigest();
+    let digestId: number | null;
+    if (fields.digestId === undefined) {
+      const pendingDigest = await this.store.getPendingDigest();
+      digestId = pendingDigest.id;
+    } else {
+      digestId = fields.digestId;
+    }
 
     const processed: ProcessedEmail = {
       id: email.id,
@@ -314,29 +406,76 @@ export class TriageEngine {
       subject: email.subject,
       receivedAt: email.receivedAt,
       processedAt: new Date().toISOString(),
-      classification,
-      confidence,
-      reasoning,
-      contentSummary,
-      labelsApplied: labelsApplied || null,
-      actionTaken,
-      contentFormat,
-      digestId: pendingDigest.id,
+      classification: fields.classification,
+      confidence: fields.confidence,
+      reasoning: fields.reasoning,
+      contentSummary: fields.contentSummary,
+      labelsApplied: fields.labelsApplied || null,
+      actionTaken: fields.actionTaken,
+      contentFormat: fields.contentFormat ?? "standard",
+      digestId,
       listId: normalizeListId(email["header:List-Id:asText"]),
+      baseClassification: null,
+      configHash: fields.configHash ?? null,
     };
 
     await this.store.saveProcessedEmail(processed);
   }
 
-  // Manual triage for testing
-  async triageEmail(emailId: string): Promise<TriageResult> {
-    const emails = await this.jmap.getEmails([emailId]);
-    if (emails.length === 0) {
-      throw new Error(`Email not found: ${emailId}`);
+  /**
+   * Trash one-time-code emails past their TTL — but only mail the user never
+   * touched: anything read, filed, or archived is marked 'otp-kept' and left
+   * alone, so an OTP false positive the user cared about is never destroyed.
+   * The move is self-attributed via the mutation registry, so the event log
+   * records it as fastermail's action, not the user's. action_taken flips to
+   * 'otp-expired' only when the move actually happened (or the email is
+   * already gone); transient failures leave 'otp-bypass' so the next poll
+   * retries instead of silently recording a trash move that never happened.
+   */
+  private async expireOtps(): Promise<void> {
+    const cutoff = new Date(Date.now() - OTP_TTL_MS).toISOString();
+    const expired = await this.store.getExpiredOtpEmails(cutoff);
+    if (expired.length === 0) return;
+
+    const trash = await this.jmap.findMailboxByRole("trash");
+    if (!trash) {
+      console.error("OTP expiry: trash mailbox not found; leaving OTPs for retry");
+      return;
     }
 
-    const config = await buildConfigFromStore(this.store);
-    return this.processEmail(emails[0], config);
+    for (const email of expired) {
+      let current;
+      try {
+        const fetched = await this.jmap.getEmails([email.id], ["id", "keywords", "mailboxIds"]);
+        current = fetched[0];
+      } catch (error) {
+        console.error(`OTP expiry: could not fetch ${email.id}, will retry:`, error);
+        continue;
+      }
+
+      if (!current) {
+        // Already deleted (by the user or another client)
+        await this.store.setActionTaken(email.id, "otp-expired");
+        continue;
+      }
+
+      const wasRead = Boolean(current.keywords["$seen"]);
+      const stillInInbox = this.inboxId ? current.mailboxIds[this.inboxId] === true : false;
+      if (wasRead || !stillInInbox) {
+        await this.store.setActionTaken(email.id, "otp-kept");
+        console.log(`  [otp-kept] ${email.subject?.slice(0, 50) || email.id} (user touched it)`);
+        continue;
+      }
+
+      try {
+        await this.jmap.moveEmail(email.id, trash.id);
+      } catch (error) {
+        console.error(`OTP expiry: move failed for ${email.id}, will retry:`, error);
+        continue;
+      }
+      await this.store.setActionTaken(email.id, "otp-expired");
+      console.log(`  [otp-expired] ${email.subject?.slice(0, 50) || email.id}`);
+    }
   }
 
   async getStats(): Promise<{

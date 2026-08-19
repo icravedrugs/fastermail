@@ -257,9 +257,31 @@ export class ActivityWatcher {
   }
 
   private async resetBaseline(): Promise<void> {
+    const hadState = (await this.store.getSyncState(SYNC_STATE_KEY)) !== null;
+
+    // The client's cached cursor may be the dead state that just failed;
+    // clear it so getEmailChanges() takes its initial-state branch instead of
+    // re-issuing the dead cursor forever.
+    this.jmap.clearEmailState();
     const baseline = await this.jmap.getEmailChanges();
     await this.store.setSyncState(SYNC_STATE_KEY, baseline.newState);
-    console.log("Activity watcher: baseline email state established");
+
+    if (hadState) {
+      // A reset mid-run means every change between the dead cursor and now
+      // was lost. Say so loudly AND leave a marker in the event log itself,
+      // so analysis windows know the record has a hole.
+      console.error(
+        "Activity watcher: RESET — server change history lost; events between the dead cursor and now were NOT captured"
+      );
+      await this.store.recordEvent({
+        emailId: null,
+        type: "watcher_reset",
+        source: "fastermail",
+        detail: { reason: "cannotCalculateChanges" },
+      });
+    } else {
+      console.log("Activity watcher: baseline email state established");
+    }
   }
 
   private async refreshMailboxNames(): Promise<void> {

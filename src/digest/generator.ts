@@ -3,6 +3,8 @@ import type { Store, ProcessedEmail } from "../db/index.js";
 import type { JMAPClient } from "../jmap/index.js";
 import { applySummaryStrategy, requiresEmailBody } from "./strategies.js";
 import type { ExtractedLink } from "./link-extractor.js";
+import { signActionToken } from "../signing.js";
+import { GITHUB_SENDER } from "../triage/pretriage.js";
 
 export interface DigestConfig {
   anthropicApiKey: string;
@@ -11,16 +13,30 @@ export interface DigestConfig {
   instanceId?: string; // For debugging duplicate sends
 }
 
+export interface DigestItem {
+  emailId: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  summary: string;
+  links?: ExtractedLink[];
+  // Number of thread messages this row represents (>1 = collapsed thread)
+  threadCount?: number;
+  // Email was routed to the inbox but keeps its digest row so the
+  // rescue/delete signal survives — see docs/window-2-handoff.md Phase 1
+  promoted?: boolean;
+}
+
 export interface DigestSection {
   title: string;
-  items: Array<{
-    emailId: string;
-    threadId: string;
-    from: string;
-    subject: string;
-    summary: string;
-    links?: ExtractedLink[];
-  }>;
+  items: DigestItem[];
+}
+
+export interface DigestInclusion {
+  emailId: string;
+  strategy: string;
+  promoted: boolean;
+  threadSize?: number;
 }
 
 export interface Digest {
@@ -31,6 +47,12 @@ export interface Digest {
   totalEmails: number;
   htmlBody: string;
   textBody: string;
+  // The rows actually rendered, captured at render time — digest_included
+  // events are emitted from this, never from a post-send re-query
+  included: DigestInclusion[];
+  // Every email that belonged to this digest when rendering began; emails
+  // triaged after this snapshot are reassigned to the next digest
+  snapshotEmailIds: string[];
 }
 
 export class DigestGenerator {
@@ -63,8 +85,33 @@ export class DigestGenerator {
 
     console.log(`Generating digest for ${digestEmails.length} emails...`);
 
+    // Collapse GitHub PR notification threads to one row per thread (window 1:
+    // 14% of digest rows were repeats of a thread already shown). The latest
+    // message represents the thread; members stay associated with the digest.
+    const threadSizes = new Map<string, number>(); // representative id -> thread size
+    const collapsedEmails: ProcessedEmail[] = [];
+    const seenGithubThreads = new Map<string, ProcessedEmail>();
+
+    for (const email of digestEmails) {
+      if (email.fromEmail.toLowerCase() === GITHUB_SENDER && email.threadId) {
+        const existing = seenGithubThreads.get(email.threadId);
+        // getEmailsByDigestId orders by received_at DESC, so first seen = latest
+        if (existing) {
+          threadSizes.set(existing.id, (threadSizes.get(existing.id) ?? 1) + 1);
+          continue;
+        }
+        seenGithubThreads.set(email.threadId, email);
+        threadSizes.set(email.id, 1);
+      }
+      collapsedEmails.push(email);
+    }
+
+    const promotedIds = new Set(
+      digestEmails.filter((e) => e.actionTaken === "promoted").map((e) => e.id)
+    );
+
     // Group emails by category/type
-    const grouped = this.groupEmails(digestEmails);
+    const grouped = this.groupEmails(collapsedEmails);
 
     // Generate summaries for each group
     const sections: DigestSection[] = [];
@@ -73,11 +120,37 @@ export class DigestGenerator {
       if (categoryEmails.length === 0) continue;
 
       const items = await this.summarizeGroup(category, categoryEmails);
+      for (const item of items) {
+        const size = threadSizes.get(item.emailId);
+        if (size && size > 1) {
+          item.threadCount = size;
+        }
+        // Inherited thread rows store internal reasoning as their fallback
+        // summary — never show that placeholder to the user
+        if (!item.summary || item.summary.startsWith("Thread continuation")) {
+          item.summary =
+            size && size > 1
+              ? `${size} notifications in this thread`
+              : "New activity in this thread";
+        }
+        if (promotedIds.has(item.emailId)) {
+          item.promoted = true;
+        }
+      }
       sections.push({
         title: this.formatCategoryTitle(category),
         items,
       });
     }
+
+    const included: DigestInclusion[] = collapsedEmails.map((e) => ({
+      emailId: e.id,
+      strategy: e.contentFormat,
+      promoted: promotedIds.has(e.id),
+      ...((threadSizes.get(e.id) ?? 1) > 1
+        ? { threadSize: threadSizes.get(e.id) }
+        : {}),
+    }));
 
     // Generate HTML and text bodies with cleanup link
     const cleanupUrl = this.config.baseUrl && pendingDigest.cleanupToken
@@ -95,6 +168,8 @@ export class DigestGenerator {
       totalEmails: digestEmails.length,
       htmlBody,
       textBody,
+      included,
+      snapshotEmailIds: emails.map((e) => e.id),
     };
   }
 
@@ -151,8 +226,8 @@ export class DigestGenerator {
   private async summarizeGroup(
     category: string,
     emails: ProcessedEmail[]
-  ): Promise<Array<{ emailId: string; threadId: string; from: string; subject: string; summary: string; links?: ExtractedLink[] }>> {
-    const results: Array<{ emailId: string; threadId: string; from: string; subject: string; summary: string; links?: ExtractedLink[] }> = [];
+  ): Promise<DigestItem[]> {
+    const results: DigestItem[] = [];
 
     for (const email of emails) {
       try {
@@ -203,14 +278,23 @@ export class DigestGenerator {
   }
 
   // Route outbound digest links through our own /r endpoint so every click
-  // is recorded as a digest_click event before redirecting.
+  // is recorded as a digest_click event before redirecting. Links are
+  // HMAC-signed: these URLs live in the mailbox forever, and an unsigned /r
+  // would be an open redirect.
   private trackUrl(
     emailId: string,
     url: string,
     action: "open-link" | "open-thread"
   ): string {
     if (!this.config.baseUrl) return url;
-    return `${this.config.baseUrl}/r?id=${encodeURIComponent(emailId)}&a=${action}&u=${encodeURIComponent(url)}`;
+    const token = signActionToken(["r", emailId, action, url]);
+    return `${this.config.baseUrl}/r?id=${encodeURIComponent(emailId)}&a=${action}&u=${encodeURIComponent(url)}&t=${token}`;
+  }
+
+  private actionUrl(emailId: string, op: "delete" | "inbox", scope: "" | "thread"): string {
+    const token = signActionToken(["email-action", emailId, op, scope]);
+    const scopeParam = scope ? `&scope=${scope}` : "";
+    return `${this.config.baseUrl}/email-action?id=${encodeURIComponent(emailId)}&op=${op}${scopeParam}&t=${token}`;
   }
 
   private escapeHtml(text: string): string {
@@ -236,16 +320,28 @@ export class DigestGenerator {
               .map(
                 (item) => {
                   const fastmailUrl = `https://app.fastmail.com/mail/Inbox/${item.threadId}.${item.emailId}`;
+                  const isThread = (item.threadCount ?? 1) > 1;
+                  const deleteLabel = isThread ? `[delete thread]` : `[delete]`;
+                  const inboxLink = item.promoted
+                    ? ""
+                    : `<a href="${this.actionUrl(item.emailId, "inbox", "")}" style="color: #999; text-decoration: none; margin-left: 8px;">[inbox]</a>`;
                   const actionLinks = baseUrl ? `
                 <div style="margin-top: 6px; font-size: 12px;">
-                  <a href="${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=delete" style="color: #999; text-decoration: none;">[delete]</a>
-                  <a href="${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=inbox" style="color: #999; text-decoration: none; margin-left: 8px;">[inbox]</a>
+                  <a href="${this.actionUrl(item.emailId, "delete", isThread ? "thread" : "")}" style="color: #999; text-decoration: none;">${deleteLabel}</a>
+                  ${inboxLink}
                 </div>` : "";
+                  const threadBadge = isThread
+                    ? ` <span style="color: #666; font-weight: 400; font-size: 13px;">(${item.threadCount} messages)</span>`
+                    : "";
+                  const promotedBadge = item.promoted
+                    ? `<div style="margin-top: 4px;"><span style="font-size: 11px; color: #0a7d33; background: #e6f6ec; padding: 2px 8px; border-radius: 10px;">already in your inbox</span></div>`
+                    : "";
                   return `
               <li style="margin-bottom: 12px; padding: 12px; background: #f9f9f9; border-radius: 8px;">
                 <div style="font-weight: 600;">
-                  <a href="${this.trackUrl(item.emailId, fastmailUrl, "open-thread")}" style="color: #333; text-decoration: none;">${this.escapeHtml(item.subject)}</a>
+                  <a href="${this.trackUrl(item.emailId, fastmailUrl, "open-thread")}" style="color: #333; text-decoration: none;">${this.escapeHtml(item.subject)}</a>${threadBadge}
                 </div>
+                ${promotedBadge}
                 <div style="font-size: 13px; color: #666; margin-top: 4px;">From: ${this.escapeHtml(item.from)}</div>
                 <div style="font-size: 14px; color: #444; margin-top: 8px;">${this.escapeHtml(item.summary)}</div>
                 ${item.links && item.links.length > 0 ? `
@@ -305,7 +401,10 @@ export class DigestGenerator {
           section.items
             .map((item) => {
               const fastmailUrl = `https://app.fastmail.com/mail/Inbox/${item.threadId}.${item.emailId}`;
-              let text = `* ${item.subject}\n  From: ${item.from}\n  ${item.summary}\n  View: ${fastmailUrl}`;
+              const isThread = (item.threadCount ?? 1) > 1;
+              const subjectSuffix = isThread ? ` (${item.threadCount} messages)` : "";
+              const promotedNote = item.promoted ? "\n  [already in your inbox]" : "";
+              let text = `* ${item.subject}${subjectSuffix}${promotedNote}\n  From: ${item.from}\n  ${item.summary}\n  View: ${fastmailUrl}`;
               if (item.links && item.links.length > 0) {
                 text += "\n  Links:";
                 for (const link of item.links) {
@@ -316,8 +415,10 @@ export class DigestGenerator {
                 }
               }
               if (baseUrl) {
-                text += `\n  Actions: [delete] ${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=delete`;
-                text += `\n           [inbox] ${baseUrl}/email-action?id=${encodeURIComponent(item.emailId)}&op=inbox`;
+                text += `\n  Actions: [delete${isThread ? " thread" : ""}] ${this.actionUrl(item.emailId, "delete", isThread ? "thread" : "")}`;
+                if (!item.promoted) {
+                  text += `\n           [inbox] ${this.actionUrl(item.emailId, "inbox", "")}`;
+                }
               }
               return text;
             })
@@ -355,25 +456,44 @@ Generated by Fastermail${this.config.instanceId ? ` | Instance: ${this.config.in
 
     // Mark current digest as sent and create new pending digest for future emails
     await this.store.markDigestSent(digest.id, digest.totalEmails, digest.textBody);
-    await this.store.createPendingDigest();
+    const nextPending = await this.store.createPendingDigest();
 
-    // Record which emails this digest represented and with what presentation
-    // strategy, so digest engagement has a denominator.
+    // Emails triaged while this digest was rendering/sending carry its id but
+    // never appeared in it — hand them to the next digest instead of leaving
+    // them orphaned on a sent one (and inflating the engagement denominator).
     try {
-      const included = await this.store.getEmailsByDigestId(digest.id);
-      for (const email of included) {
-        if (email.fromEmail.toLowerCase() === this.config.userEmail.toLowerCase()) continue;
+      const reassigned = await this.store.reassignDigestEmails(
+        digest.id,
+        nextPending.id,
+        digest.snapshotEmailIds
+      );
+      if (reassigned > 0) {
+        console.log(`Reassigned ${reassigned} late-triaged emails to digest ${nextPending.id}`);
+      }
+    } catch (err) {
+      console.error("Failed to reassign late-triaged digest emails:", err);
+    }
+
+    // Record what this digest actually rendered — one event per rendered row,
+    // captured at render time, so digest engagement has an honest denominator.
+    try {
+      for (const row of digest.included) {
         await this.store.recordEvent({
-          emailId: email.id,
+          emailId: row.emailId,
           type: "digest_included",
           source: "fastermail",
-          detail: { digest_id: digest.id, strategy: email.contentFormat },
+          detail: {
+            digest_id: digest.id,
+            strategy: row.strategy,
+            ...(row.promoted ? { promoted: true } : {}),
+            ...(row.threadSize ? { thread_size: row.threadSize } : {}),
+          },
         });
       }
     } catch (err) {
       console.error("Failed to record digest_included events:", err);
     }
 
-    console.log(`Digest sent with ${digest.totalEmails} emails`);
+    console.log(`Digest sent with ${digest.totalEmails} emails (${digest.included.length} rows rendered)`);
   }
 }

@@ -26,6 +26,8 @@ export interface ProcessedEmail {
   contentFormat: ContentFormat;
   digestId: number | null;
   listId: string | null;
+  baseClassification: string | null;
+  configHash: string | null;
 }
 
 export type ActivityEventType =
@@ -36,14 +38,20 @@ export type ActivityEventType =
   | "answered"
   | "flagged"
   | "digest_included"
-  | "digest_click";
+  | "digest_click"
+  | "watcher_reset";
 
 export type ActivityEventSource = "user" | "fastermail";
 
 export interface ActivityEvent {
   emailId: string | null;
   type: ActivityEventType;
+  // When the action is claimed to have happened. Watcher events cannot know
+  // this (JMAP's change feed is timestamp-free), so for them at == observedAt
+  // and any latency finer than the poll interval is below the resolution floor.
   at?: string;
+  // When we observed the change; defaults to now.
+  observedAt?: string;
   source: ActivityEventSource;
   detail?: Record<string, unknown>;
 }
@@ -124,6 +132,8 @@ export class Store {
       contentFormat: (row.content_format as ContentFormat) || "standard",
       digestId: row.digest_id as number | null,
       listId: (row.list_id as string | null) ?? null,
+      baseClassification: (row.base_classification as string | null) ?? null,
+      configHash: (row.config_hash as string | null) ?? null,
     };
   }
 
@@ -139,8 +149,8 @@ export class Store {
     await this.db.execute({
       sql: `INSERT OR REPLACE INTO processed_emails
             (id, thread_id, from_email, from_name, subject, received_at,
-             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id, list_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             processed_at, classification, confidence, reasoning, content_summary, labels_applied, action_taken, content_format, digest_id, list_id, base_classification, config_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         email.id,
         email.threadId,
@@ -158,6 +168,8 @@ export class Store {
         email.contentFormat,
         email.digestId,
         email.listId,
+        email.baseClassification,
+        email.configHash,
       ],
     });
   }
@@ -575,24 +587,101 @@ export class Store {
     emailId: string,
     newClassification: string
   ): Promise<void> {
+    // Corrections are the highest-signal rows in the corpus: preserve the
+    // original classification in base_classification (first correction only)
+    // and never restamp processed_at — the original triage time is data.
     await this.db.execute({
       sql: `UPDATE processed_emails
-            SET classification = ?, processed_at = ?
+            SET base_classification = COALESCE(base_classification, classification),
+                classification = ?
             WHERE id = ?`,
-      args: [newClassification, new Date().toISOString(), emailId],
+      args: [newClassification, emailId],
+    });
+  }
+
+  async getProcessedEmailsByThreadId(threadId: string): Promise<ProcessedEmail[]> {
+    const result = await this.db.execute({
+      sql: `SELECT * FROM processed_emails WHERE thread_id = ? ORDER BY received_at DESC`,
+      args: [threadId],
+    });
+
+    return result.rows.map((row) => this.mapProcessedEmail(row));
+  }
+
+  /**
+   * Most recent real classification in a thread, for thread-level consistency.
+   * Excludes 'skipped' rows and the legacy phantom 'Already labeled' rows.
+   */
+  async getLatestThreadClassification(
+    threadId: string
+  ): Promise<Pick<ProcessedEmail, "classification" | "confidence" | "contentFormat" | "configHash"> | null> {
+    const result = await this.db.execute({
+      sql: `SELECT classification, confidence, content_format, config_hash FROM processed_emails
+            WHERE thread_id = ?
+              AND classification != 'skipped'
+              AND NOT (confidence = 1.0 AND reasoning = 'Already labeled')
+            ORDER BY received_at DESC LIMIT 1`,
+      args: [threadId],
+    });
+
+    if (result.rows.length === 0) return null;
+    const row = result.rows[0];
+    return {
+      classification: row.classification as string,
+      confidence: row.confidence as number,
+      contentFormat: (row.content_format as ContentFormat) || "standard",
+      configHash: (row.config_hash as string | null) ?? null,
+    };
+  }
+
+  /**
+   * Move emails that were assigned to a digest but not rendered in it over to
+   * the next pending digest, so they appear in a future digest instead of
+   * silently belonging to a sent one.
+   */
+  async reassignDigestEmails(
+    fromDigestId: number,
+    toDigestId: number,
+    renderedIds: string[]
+  ): Promise<number> {
+    const placeholders = renderedIds.map(() => "?").join(",");
+    const result = await this.db.execute({
+      sql: `UPDATE processed_emails SET digest_id = ?
+            WHERE digest_id = ?${renderedIds.length > 0 ? ` AND id NOT IN (${placeholders})` : ""}`,
+      args: [toDigestId, fromDigestId, ...renderedIds],
+    });
+    return result.rowsAffected;
+  }
+
+  async getExpiredOtpEmails(cutoffIso: string): Promise<ProcessedEmail[]> {
+    const result = await this.db.execute({
+      sql: `SELECT * FROM processed_emails
+            WHERE action_taken = 'otp-bypass' AND received_at < ?`,
+      args: [cutoffIso],
+    });
+
+    return result.rows.map((row) => this.mapProcessedEmail(row));
+  }
+
+  async setActionTaken(emailId: string, actionTaken: string): Promise<void> {
+    await this.db.execute({
+      sql: `UPDATE processed_emails SET action_taken = ? WHERE id = ?`,
+      args: [actionTaken, emailId],
     });
   }
 
   // ============ Activity Events ============
 
   async recordEvent(event: ActivityEvent): Promise<void> {
+    const observedAt = event.observedAt ?? new Date().toISOString();
     await this.db.execute({
-      sql: `INSERT INTO events (email_id, type, at, source, detail)
-            VALUES (?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO events (email_id, type, at, observed_at, source, detail)
+            VALUES (?, ?, ?, ?, ?, ?)`,
       args: [
         event.emailId,
         event.type,
-        event.at ?? new Date().toISOString(),
+        event.at ?? observedAt,
+        observedAt,
         event.source,
         event.detail ? JSON.stringify(event.detail) : null,
       ],

@@ -734,4 +734,14 @@ export class JMAPClient {
   getCurrentState(): string | null {
     return this.emailState;
   }
+
+  /**
+   * Forget the cached Email state cursor. Required after the server reports
+   * cannotCalculateChanges: getEmailChanges() falls back to this.emailState,
+   * which still holds the dead cursor, so without clearing it the
+   * initial-state branch is unreachable for the life of the process.
+   */
+  clearEmailState(): void {
+    this.emailState = null;
+  }
 }

@@ -106,11 +106,13 @@ export async function initializeDatabase(client: Client): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_corrections_classification ON corrections(corrected_classification);
 
     -- Behavioral event log (append-only). email_id is NULL for digest-level events.
+    -- at = when the action is claimed to have happened; observed_at = when we saw it.
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       email_id TEXT,
       type TEXT NOT NULL,
       at TEXT NOT NULL,
+      observed_at TEXT,
       source TEXT NOT NULL,
       detail TEXT
     );
@@ -191,6 +193,44 @@ export async function initializeDatabase(client: Client): Promise<void> {
   } catch {
     // Column already exists, ignore error
   }
+
+  // Migration: preserve original classification when a correction is applied
+  try {
+    await client.execute(
+      "ALTER TABLE processed_emails ADD COLUMN base_classification TEXT"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  // Migration: hash of the assembled ClassifierConfig at classification time,
+  // so windows can tell which policy produced which rows
+  try {
+    await client.execute(
+      "ALTER TABLE processed_emails ADD COLUMN config_hash TEXT"
+    );
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  // Migration: observed_at = when we saw the change. `at` = when the action is
+  // claimed to have happened. For watcher events the two are equal (JMAP's
+  // change feed carries no per-change timestamp), which is itself the signal
+  // that the timestamp is at the poll-resolution floor; digest clicks carry
+  // real HTTP request times.
+  try {
+    await client.execute("ALTER TABLE events ADD COLUMN observed_at TEXT");
+  } catch {
+    // Column already exists, ignore error
+  }
+
+  // Backfill runs on every boot, outside the ALTER's try: it is idempotent
+  // (a no-op once populated) and must not be skippable forever just because
+  // it failed once on the boot where the ALTER landed. Old rows' `at` was
+  // observation time.
+  await client.execute(
+    "UPDATE events SET observed_at = at WHERE observed_at IS NULL"
+  );
 
   try {
     await client.execute(

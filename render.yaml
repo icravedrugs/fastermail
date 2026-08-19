@@ -12,6 +12,10 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Deliberate since window 2: digest times and scheduling run in the
+      # user's zone, not whatever the container happens to be in
+      - key: TZ
+        value: Europe/London
       - key: TURSO_DATABASE_URL
         sync: false # Set manually in Render dashboard
       - key: TURSO_AUTH_TOKEN

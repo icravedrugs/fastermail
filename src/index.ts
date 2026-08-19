@@ -9,6 +9,8 @@ import { TriageEngine, LabelManager } from "./triage/index.js";
 import { DigestScheduler } from "./digest/index.js";
 import { runCleanup } from "./cleanup/index.js";
 import { ActivityWatcher, SelfActionRegistry } from "./events/index.js";
+import { verifyActionToken } from "./signing.js";
+import { GITHUB_SENDER } from "./triage/pretriage.js";
 
 function validateSettings(): void {
   const required = [
@@ -248,6 +250,8 @@ async function main(): Promise<void> {
     } else if (url.pathname === "/email-action" && req.method === "GET") {
       const emailId = url.searchParams.get("id");
       const op = url.searchParams.get("op");
+      const scope = url.searchParams.get("scope") === "thread" ? "thread" : "";
+      const token = url.searchParams.get("t");
 
       if (!emailId || !op || (op !== "delete" && op !== "inbox")) {
         res.writeHead(400, { "Content-Type": "text/html" });
@@ -264,12 +268,43 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (!verifyActionToken(["email-action", emailId, op, scope], token)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Invalid or missing action token");
+        return;
+      }
+
       try {
+        // scope=thread moves the GitHub notifications the collapsed digest
+        // row actually represented: same thread, same sender, same digest.
+        // Never a human reply that threaded in, never messages from other
+        // digests — only what the row's "(N messages)" advertised.
+        let ids = [emailId];
+        if (scope === "thread") {
+          const clicked = await store.getProcessedEmail(emailId);
+          if (clicked?.threadId) {
+            const threadEmails = await store.getProcessedEmailsByThreadId(clicked.threadId);
+            const represented = threadEmails.filter(
+              (e) =>
+                e.fromEmail.toLowerCase() === GITHUB_SENDER &&
+                e.digestId === clicked.digestId
+            );
+            if (represented.length > 0) {
+              ids = represented.map((e) => e.id);
+            }
+          }
+        }
+
+        // Record the click before any JMAP call: the click is the user's
+        // verdict and stays valid even if the move below fails
         await store.recordEvent({
           emailId,
           type: "digest_click",
           source: "user",
-          detail: { action: op },
+          detail: {
+            action: op,
+            ...(scope === "thread" ? { scope, thread_size: ids.length } : {}),
+          },
         });
 
         const role = op === "delete" ? "trash" : "inbox";
@@ -277,7 +312,16 @@ async function main(): Promise<void> {
         if (!mailbox) {
           throw new Error(`${role} mailbox not found`);
         }
-        await jmap.moveEmail(emailId, mailbox.id);
+
+        if (scope === "thread") {
+          const updates: Record<string, Record<string, unknown>> = {};
+          for (const id of ids) {
+            updates[id] = { mailboxIds: { [mailbox.id]: true } };
+          }
+          await jmap.batchUpdateEmails(updates);
+        } else {
+          await jmap.moveEmail(emailId, mailbox.id);
+        }
 
         const label = op === "delete" ? "Deleted" : "Moved to Inbox";
         res.writeHead(200, { "Content-Type": "text/html" });
@@ -307,10 +351,13 @@ async function main(): Promise<void> {
         `);
       }
     } else if (url.pathname === "/r" && req.method === "GET") {
-      // Click-tracking redirect for digest links
+      // Click-tracking redirect for digest links. The HMAC token binds the
+      // exact (email, action, target) triple we minted at digest time, so
+      // this is not an open redirect.
       const emailId = url.searchParams.get("id");
       const action = url.searchParams.get("a");
       const target = url.searchParams.get("u");
+      const token = url.searchParams.get("t");
 
       if (
         !emailId ||
@@ -320,6 +367,12 @@ async function main(): Promise<void> {
       ) {
         res.writeHead(400, { "Content-Type": "text/plain" });
         res.end("Invalid redirect request");
+        return;
+      }
+
+      if (!verifyActionToken(["r", emailId, action, target], token)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Invalid or missing redirect token");
         return;
       }
 
