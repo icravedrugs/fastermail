@@ -1,6 +1,13 @@
 import { config } from "dotenv";
 config();
 
+// Render ignores render.yaml envVars for this dashboard-created service, so
+// pin the schedule zone in code: digest times mean Europe/London wall clock.
+// Must run before anything constructs a Date.
+if (!process.env.TZ) {
+  process.env.TZ = "Europe/London";
+}
+
 import http from "http";
 import { JMAPClient } from "./jmap/index.js";
 import { createDbClient, initializeDatabase, Store } from "./db/index.js";
@@ -391,7 +398,13 @@ async function main(): Promise<void> {
       res.end();
     } else if (url.pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok" }));
+      res.end(
+        JSON.stringify({
+          status: "ok",
+          tz: process.env.TZ ?? "unset",
+          localHour: new Date().getHours(),
+        })
+      );
     } else {
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(`

@@ -7,7 +7,7 @@ Analysis jobs read the most recent "Batch shipped" line to scope their window.
 
 **Batch shipped: 2026-08-19, commit 1537190e18f81e026422222262694b30fa024743** — window 2 starts here.
 Instrument notes for anyone reading pre/post data:
-- Digest times shifted meaning at this commit: `TZ=Europe/London` is now set, so `09:00,18:00` are London times (they were UTC by accident before).
+- Digest times shifted meaning — but NOT at this commit: Render ignored render.yaml's `TZ` (dashboard-created service, no blueprint sync); the 2026-08-19 18:00Z digest proved the container stayed UTC. The zone is pinned in code (index.ts sets `TZ=Europe/London`) in the follow-up commit, so London times apply from the evening of 2026-08-19. Timing comparisons across that boundary must account for the 1h shift.
 - Action links (`/email-action`, `/r`) are HMAC-signed from this commit; links in digests sent before it return 403. `/cleanup` tokens are unaffected.
 - `digest_included` events now count **rendered rows only** (collapsed GitHub threads = one event with `thread_size`); per-email membership remains on `processed_emails.digest_id`.
 - Filtered emails now write `classification='skipped'` (`digest_id` NULL). The 28 pre-fix phantom rows (`confidence=1.0 AND reasoning='Already labeled'`, all noam@10ne.org) remain in place as history — exclude them from any classification stats.
