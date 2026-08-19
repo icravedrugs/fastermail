@@ -12,6 +12,8 @@ Instrument notes for anyone reading pre/post data:
 - `digest_included` events now count **rendered rows only** (collapsed GitHub threads = one event with `thread_size`); per-email membership remains on `processed_emails.digest_id`.
 - Filtered emails now write `classification='skipped'` (`digest_id` NULL). The 28 pre-fix phantom rows (`confidence=1.0 AND reasoning='Already labeled'`, all noam@10ne.org) remain in place as history — exclude them from any classification stats.
 - GitHub inherited rows (`reasoning='Thread continuation (classification inherited)'`) carry the **origin** row's `config_hash` and must be excluded from classifier-accuracy stats — the classifier never saw them.
+- A watcher baseline reset now writes an `events` row `type='watcher_reset'` — query for it before trusting a window's event log; its presence means a gap of unknown size.
+- `action_taken` gained values: `skipped`, `promoted`, `otp-bypass`, `otp-expired`, `otp-kept`. Promoted digest rows also carry `promoted: true` in their `digest_included` event detail; thread-scoped digest deletes carry `scope`/`thread_size` in `digest_click` detail.
 - Known accepted risks: signed action links are still state-changing GETs (no scanner/prefetcher sits in this personal Fastmail path; revisit if mail routing ever changes); a residual ~1e-4/window digest-handover race can orphan an email's digest linkage (hardening idea: self-healing sweep in generateDigest); `code: <digits>` subjects without an auth qualifier still trigger OTP detection ("Locker pickup code: 4832") — mitigated by the unread-and-in-inbox guard on auto-trash, and precision is auditable via `action_taken IN ('otp-bypass','otp-expired','otp-kept')`.
 
 ---
