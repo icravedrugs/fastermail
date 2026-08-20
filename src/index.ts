@@ -19,6 +19,25 @@ import { ActivityWatcher, SelfActionRegistry } from "./events/index.js";
 import { verifyActionToken } from "./signing.js";
 import { GITHUB_SENDER } from "./triage/pretriage.js";
 
+// Shown when an action link fails signature verification. The common cause is
+// a digest sent before 2026-08-19, when links were unsigned.
+function legacyLinkPage(): string {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="utf-8"><title>Link Expired</title></head>
+    <body style="font-family: sans-serif; max-width: 600px; margin: 50px auto; text-align: center;">
+      <h1>This link no longer works</h1>
+      <p>Quick-action links are now signed for security, so links in digests
+      sent before <strong>19 August 2026</strong> can't be used anymore.</p>
+      <p style="color: #666;">Links in every digest from that date onward work
+      normally. For older digests, the "I'm Done &mdash; Archive Emails" button
+      still works, or act on the email directly in Fastmail.</p>
+    </body>
+    </html>
+  `;
+}
+
 function validateSettings(): void {
   const required = [
     { key: "TURSO_DATABASE_URL", value: process.env.TURSO_DATABASE_URL },
@@ -276,8 +295,8 @@ async function main(): Promise<void> {
       }
 
       if (!verifyActionToken(["email-action", emailId, op, scope], token)) {
-        res.writeHead(403, { "Content-Type": "text/plain" });
-        res.end("Invalid or missing action token");
+        res.writeHead(403, { "Content-Type": "text/html" });
+        res.end(legacyLinkPage());
         return;
       }
 
@@ -378,8 +397,8 @@ async function main(): Promise<void> {
       }
 
       if (!verifyActionToken(["r", emailId, action, target], token)) {
-        res.writeHead(403, { "Content-Type": "text/plain" });
-        res.end("Invalid or missing redirect token");
+        res.writeHead(403, { "Content-Type": "text/html" });
+        res.end(legacyLinkPage());
         return;
       }
 
